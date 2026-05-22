@@ -3,7 +3,25 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { activityMonitor } from "./activity.js";
 import type { ExtractedContent } from "./extract.js";
-import type { SearchOptions, SearchResponse } from "./perplexity.js";
+
+export interface SearchResult {
+	title: string;
+	url: string;
+	snippet: string;
+}
+
+export interface SearchResponse {
+	answer: string;
+	results: SearchResult[];
+	inlineContent?: ExtractedContent[];
+}
+
+export interface SearchOptions {
+	numResults?: number;
+	recencyFilter?: "day" | "week" | "month" | "year";
+	domainFilter?: string[];
+	signal?: AbortSignal;
+}
 
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";

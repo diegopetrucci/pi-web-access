@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ExtractedContent } from "./extract.js";
-import type { SearchResult } from "./perplexity.js";
+import type { SearchResult } from "./exa.js";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
