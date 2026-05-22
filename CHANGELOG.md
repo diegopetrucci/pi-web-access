@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [tlh-v0.10.7-1] - 2026-05-22
+
+Forked from upstream v0.10.7 (commit 076bf0db5e739b200286ca37486e4edd8d19123c).
+
+### Removed
+- tool: `code_search`
+- providers: Perplexity, Gemini API, Gemini Web, browser-cookie auth
+  (`PI_ALLOW_BROWSER_COOKIES` / `FEYNMAN_ALLOW_BROWSER_COOKIES`, Chromium
+  cookie extraction, Keychain/secret-tool fallbacks)
+- features: video (yt-dlp, ffmpeg), YouTube, PDF (unpdf), GitHub clone
+  cache, RSC handling
+- UI: curator HTTP server, browser launcher, curator-page, glimpse
+  native curator
+- commands: `/websearch`, `/curator`, `/search`, `/google-account`
+- shortcuts: Ctrl+Shift+S (curate), Ctrl+Shift+W (activity)
+- bundled librarian skill (`skills/librarian/SKILL.md`)
+- dependencies: unpdf, sqlite cookie store, and any others only used by
+  removed code
+
+### Fixed
+- upstream typebox import bug (already shipped in upstream v0.10.7;
+  verified clean install)
+
+### Changed
+- configuration and cache are rooted under `$PI_CODING_AGENT_DIR`
+  (see `paths.ts` and README "Migrating from upstream pi-web-access")
+- `web_search.provider` parameter removed (only Exa is supported)
+- EXA key precedence corrected to match spec: explicit settings file value
+  takes priority over `EXA_API_KEY` env var (settings > env > MCP fallback)
+- added `redact.ts` key-redaction helpers; raw API key is now scrubbed from
+  all error messages and log output
+
+### Security
+- new shared request-guard (`request-guard.ts`):
+  - scheme allowlist (http/https only; rejects file/data/ftp/javascript/gopher)
+  - DNS-rebinding-resistant host-deny (loopback, RFC1918, link-local,
+    cloud metadata 169.254.169.254, CGNAT, ULA, .internal/.local/.localhost)
+  - per-task fetch budget (default 6 fetches)
+  - per-fetch streamed body cap (default 5 MiB)
+- configuration isolation: no read/write under `~/.pi` (verified by a
+  CI grep test and a HOME-isolated runtime probe)
+- secrets-leakage tests: EXA_API_KEY never written to settings backups,
+  never appears in thrown error messages, and never appears in log output
+
 ## [0.10.7] - 2026-05-02
 
 ### Added

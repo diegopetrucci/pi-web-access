@@ -1,0 +1,25 @@
+The Last Harness fork of pi-web-access
+======================================
+
+Upstream project: https://github.com/nicobailon/pi-web-access
+Upstream version: v0.10.7
+Upstream commit:  076bf0db5e739b200286ca37486e4edd8d19123c
+Upstream license: MIT (see LICENSE)
+
+Modifications
+-------------
+
+This fork is maintained by Diego Petrucci as part of The Last Harness
+(https://github.com/diegopetrucci/the-last-harness). It is trimmed to:
+
+  - Exa search only (Perplexity, Gemini API/Web, browser-cookie auth,
+    video, PDF, GitHub clone cache, curator UI, and the bundled
+    librarian skill are removed).
+  - The three tools web_search, fetch_content, get_search_content.
+  - Isolated configuration under $PI_CODING_AGENT_DIR (no ~/.pi access).
+  - Code-side request safety (scheme allowlist, DNS-rebinding-resistant
+    host-deny list, per-task fetch budget, per-response size cap).
+
+Full spec: docs/web-search-spec.md in the parent harness repo.
+
+See CHANGELOG.md for the per-release list of changes.

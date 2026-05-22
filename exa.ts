@@ -4,6 +4,7 @@ import { activityMonitor } from "./activity.js";
 import { resolveProfilePaths } from "./paths.js";
 import type { ExtractedContent } from "./extract.js";
 import { createRequestGuard, type RequestGuard } from "./request-guard.js";
+import { scrubKey } from "./redact.js";
 
 export interface SearchResult {
 	title: string;
@@ -104,7 +105,10 @@ function normalizeApiKey(value: unknown): string | null {
 }
 
 function getApiKey(): string | null {
-	return normalizeApiKey(process.env.EXA_API_KEY) ?? normalizeApiKey(loadConfig().exaApiKey);
+	// Precedence (per spec): explicit setting in isolated profile > EXA_API_KEY env > MCP fallback.
+	// Settings-file value wins so that users who set the key explicitly in their profile are never
+	// silently overridden by a shell environment variable.
+	return normalizeApiKey(loadConfig().exaApiKey) ?? normalizeApiKey(process.env.EXA_API_KEY);
 }
 
 function getCurrentMonth(): string {
@@ -483,7 +487,7 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 
 			if (!response.ok) {
 				const errorText = await response.text();
-				throw new Error(`Exa API error ${response.status}: ${errorText.slice(0, 300)}`);
+				throw new Error(`Exa API error ${response.status}: ${scrubKey(errorText.slice(0, 300), apiKey)}`);
 			}
 
 			const data = await response.json() as ExaAnswerResponse;
@@ -518,7 +522,7 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 
 		if (!response.ok) {
 			const errorText = await response.text();
-			throw new Error(`Exa API error ${response.status}: ${errorText.slice(0, 300)}`);
+			throw new Error(`Exa API error ${response.status}: ${scrubKey(errorText.slice(0, 300), apiKey)}`);
 		}
 
 		const data = await response.json() as ExaSearchResponse;
