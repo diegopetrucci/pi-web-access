@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { fetchAllContent, type ExtractedContent } from "./extract.js";
 import { searchWithExa, isExaAvailable, type SearchResult } from "./exa.js";
+import { createRequestGuard } from "./request-guard.js";
 import {
 	clearResults,
 	generateId,
@@ -63,7 +64,8 @@ export default function (pi: ExtensionAPI) {
 		const fetchId = generateId();
 		const controller = new AbortController();
 		pendingFetches.set(fetchId, controller);
-		fetchAllContent(urls, controller.signal)
+		const bgGuard = createRequestGuard();
+		fetchAllContent(urls, controller.signal, undefined, bgGuard)
 			.then((fetched) => {
 				if (!sessionActive || !pendingFetches.has(fetchId)) return;
 				const data: StoredSearchData = {
@@ -225,6 +227,8 @@ export default function (pi: ExtensionAPI) {
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
 
+			const searchGuard = createRequestGuard();
+
 			for (let i = 0; i < queryList.length; i++) {
 				const query = queryList[i];
 
@@ -240,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 						domainFilter: params.domainFilter,
 						includeContent: params.includeContent,
 						signal,
-					});
+					}, searchGuard);
 
 					if (!result) {
 						searchResults.push({ query, answer: "", results: [], error: "No results returned", provider: "exa" });
@@ -393,7 +397,8 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal);
+			const fetchGuard = createRequestGuard();
+			const fetchResults = await fetchAllContent(urlList, signal, undefined, fetchGuard);
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 

@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import pLimit from "p-limit";
 import { activityMonitor } from "./activity.js";
+import { createRequestGuard, type RequestGuard, RequestBudgetExceeded } from "./request-guard.js";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
@@ -44,6 +45,7 @@ async function extractViaHttp(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	guard?: RequestGuard,
 ): Promise<ExtractedContent> {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
@@ -55,7 +57,8 @@ async function extractViaHttp(
 	signal?.addEventListener("abort", onAbort);
 
 	try {
-		const response = await fetch(url, {
+		const g = guard ?? createRequestGuard();
+		const response = await g.fetch(url, {
 			signal: controller.signal,
 			headers: {
 				"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -80,21 +83,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const contentLengthHeader = response.headers.get("content-length");
 		const contentType = response.headers.get("content-type") || "";
-		const maxResponseSize = 5 * 1024 * 1024;
-		if (contentLengthHeader) {
-			const contentLength = parseInt(contentLengthHeader, 10);
-			if (contentLength > maxResponseSize) {
-				activityMonitor.logComplete(activityId, response.status);
-				return {
-					url,
-					title: "",
-					content: "",
-					error: `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)`,
-				};
-			}
-		}
 
 		if (contentType.includes("application/octet-stream") ||
 			contentType.includes("image/") ||
@@ -153,8 +142,9 @@ async function extractViaHttp(
 
 		return { url, title: article.title || "", content: markdown, error: null };
 	} catch (err) {
+		if (err instanceof RequestBudgetExceeded) throw err;
 		const message = errorMessage(err);
-		if (message.toLowerCase().includes("abort")) {
+		if (isAbortError(err)) {
 			activityMonitor.logComplete(activityId, 0);
 		} else {
 			activityMonitor.logError(activityId, message);
@@ -195,6 +185,7 @@ export async function extractContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	guard?: RequestGuard,
 ): Promise<ExtractedContent> {
 	if (signal?.aborted) {
 		return abortedResult(url);
@@ -208,7 +199,7 @@ export async function extractContent(
 
 	if (signal?.aborted) return abortedResult(url);
 
-	const httpResult = await extractViaHttp(url, signal, options);
+	const httpResult = await extractViaHttp(url, signal, options, guard);
 
 	if (signal?.aborted) return abortedResult(url);
 	if (!httpResult.error) return httpResult;
@@ -222,6 +213,7 @@ export async function fetchAllContent(
 	urls: string[],
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	guard?: RequestGuard,
 ): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimit(() => extractContent(url, signal, options))));
+	return Promise.all(urls.map((url) => fetchLimit(() => extractContent(url, signal, options, guard))));
 }

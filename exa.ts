@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { activityMonitor } from "./activity.js";
 import { resolveProfilePaths } from "./paths.js";
 import type { ExtractedContent } from "./extract.js";
+import { createRequestGuard, type RequestGuard } from "./request-guard.js";
 
 export interface SearchResult {
 	title: string;
@@ -243,8 +244,10 @@ export async function callExaMcp(
 	toolName: string,
 	args: Record<string, unknown>,
 	signal?: AbortSignal,
+	guard?: RequestGuard,
 ): Promise<string> {
-	const response = await fetch(EXA_MCP_URL, {
+	const g = guard ?? createRequestGuard();
+	const response = await g.fetch(EXA_MCP_URL, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
@@ -386,7 +389,7 @@ function buildMcpQuery(query: string, options: ExaSearchOptions): string {
 	return parts.join(" ");
 }
 
-async function searchWithExaMcp(query: string, options: ExaSearchOptions = {}): Promise<SearchResponse | null> {
+async function searchWithExaMcp(query: string, options: ExaSearchOptions = {}, guard?: RequestGuard): Promise<SearchResponse | null> {
 	const enrichedQuery = buildMcpQuery(query, options);
 	const activityId = activityMonitor.logStart({ type: "api", query: enrichedQuery });
 
@@ -401,6 +404,7 @@ async function searchWithExaMcp(query: string, options: ExaSearchOptions = {}): 
 				contextMaxCharacters: options.includeContent ? 50000 : 3000,
 			},
 			options.signal,
+			guard,
 		);
 		const parsedResults = parseMcpResults(text);
 		activityMonitor.logComplete(activityId, 200);
@@ -445,10 +449,11 @@ export function hasExaApiKey(): boolean {
 	return !!getApiKey();
 }
 
-export async function searchWithExa(query: string, options: ExaSearchOptions = {}): Promise<ExaSearchResult> {
+export async function searchWithExa(query: string, options: ExaSearchOptions = {}, guard?: RequestGuard): Promise<ExaSearchResult> {
+	const g = guard ?? createRequestGuard();
 	const apiKey = getApiKey();
 	if (!apiKey) {
-		return searchWithExaMcp(query, options);
+		return searchWithExaMcp(query, options, g);
 	}
 
 	const budget = reserveRequestBudget();
@@ -463,7 +468,7 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 
 	try {
 		if (!useSearch) {
-			const response = await fetch(EXA_ANSWER_URL, {
+			const response = await g.fetch(EXA_ANSWER_URL, {
 				method: "POST",
 				headers: {
 					"x-api-key": apiKey,
@@ -491,7 +496,7 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 
 		const startDate = options.recencyFilter ? recencyToStartDate(options.recencyFilter) : null;
 		const domainFilters = mapDomainFilter(options.domainFilter);
-		const response = await fetch(EXA_SEARCH_URL, {
+		const response = await g.fetch(EXA_SEARCH_URL, {
 			method: "POST",
 			headers: {
 				"x-api-key": apiKey,
