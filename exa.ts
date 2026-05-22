@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { activityMonitor } from "./activity.js";
+import { resolveProfilePaths } from "./paths.js";
 import type { ExtractedContent } from "./extract.js";
 
 export interface SearchResult {
@@ -26,8 +26,6 @@ export interface SearchOptions {
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
-const CONFIG_PATH = join(homedir(), ".pi", "web-search.json");
-const USAGE_PATH = join(homedir(), ".pi", "exa-usage.json");
 
 const MONTHLY_LIMIT = 1000;
 const WARNING_THRESHOLD = 800;
@@ -82,18 +80,19 @@ let warnedMonth: string | null = null;
 
 function loadConfig(): WebSearchConfig {
 	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
+	const { settingsPath } = resolveProfilePaths();
+	if (!existsSync(settingsPath)) {
 		cachedConfig = {};
 		return cachedConfig;
 	}
 
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
+	const raw = readFileSync(settingsPath, "utf-8");
 	try {
 		cachedConfig = JSON.parse(raw) as WebSearchConfig;
 		return cachedConfig;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
+		throw new Error(`Failed to parse ${settingsPath}: ${message}`);
 	}
 }
 
@@ -122,20 +121,23 @@ function normalizeUsage(raw: unknown): ExaUsage {
 }
 
 function readUsage(): ExaUsage {
-	if (!existsSync(USAGE_PATH)) return { month: getCurrentMonth(), count: 0 };
-	const raw = readFileSync(USAGE_PATH, "utf-8");
+	const { cacheRoot } = resolveProfilePaths();
+	const usagePath = join(cacheRoot, "exa-usage.json");
+	if (!existsSync(usagePath)) return { month: getCurrentMonth(), count: 0 };
+	const raw = readFileSync(usagePath, "utf-8");
 	try {
 		return normalizeUsage(JSON.parse(raw));
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${USAGE_PATH}: ${message}`);
+		throw new Error(`Failed to parse ${usagePath}: ${message}`);
 	}
 }
 
 function writeUsage(usage: ExaUsage): void {
-	const dir = join(homedir(), ".pi");
-	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(USAGE_PATH, JSON.stringify(usage, null, 2) + "\n");
+	const { cacheRoot } = resolveProfilePaths();
+	const usagePath = join(cacheRoot, "exa-usage.json");
+	if (!existsSync(cacheRoot)) mkdirSync(cacheRoot, { recursive: true });
+	writeFileSync(usagePath, JSON.stringify(usage, null, 2) + "\n");
 }
 
 function reserveRequestBudget(): { exhausted: true } | null {

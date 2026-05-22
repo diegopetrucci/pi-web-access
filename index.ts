@@ -13,36 +13,6 @@ import {
 	type QueryResultData,
 	type StoredSearchData,
 } from "./storage.js";
-import { homedir } from "node:os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-
-const WEB_SEARCH_CONFIG_PATH = join(homedir(), ".pi", "web-search.json");
-
-interface WebSearchConfig {
-	provider?: string;
-}
-
-function loadConfig(): WebSearchConfig {
-	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return {};
-	const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-	try {
-		return JSON.parse(raw) as WebSearchConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
-	}
-}
-
-function loadConfigForExtensionInit(): WebSearchConfig {
-	try {
-		return loadConfig();
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		console.error(`[pi-web-access] ${message}`);
-		return {};
-	}
-}
 
 function normalizeQueryList(queryList: unknown[]): string[] {
 	const normalized: string[] = [];
