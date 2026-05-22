@@ -8,11 +8,19 @@
  *   - Register a resolve hook so that relative `.js` imports inside project
  *     TypeScript files are remapped to `.ts` (necessary because Node 26's
  *     native type-stripping does not map `.js` specifiers to `.ts` files).
- *   - Inject a custom RequestGuard whose fetch() returns canned responses,
- *     so no real network calls are made.
- *   - Call searchWithExa(), fetchAllContent(), storeResult(), and getResult()
- *     directly (the underlying functions that the registered tools call).
- *   - Assert shape, citations, inline truncation, and per-task budget.
+ *   - Use the REAL createRequestGuard() so scheme allowlist, host-deny, and
+ *     size-cap enforcement run end-to-end.
+ *   - Inject canned responses by replacing globalThis.fetch for the duration of
+ *     each test, then restoring it.  The real guard's validate() runs (DNS check
+ *     for hostnames; literal-IP check for banned addresses), but the actual
+ *     HTTP transport is bypassed by the stub.
+ *
+ * Tests include:
+ *   - Happy path: search → fetch → get_search_content with inline truncation.
+ *   - Scheme rejection: file:// URL → recoverable error from fetchAllContent.
+ *   - Host-deny: 169.254.169.254 literal IP → recoverable error.
+ *   - Size-cap: Content-Length > configured cap → recoverable error.
+ *   - Budget exhaustion: shared guard runs out → RequestBudgetExceeded thrown.
  *
  * Real-network counterpart:
  *   Set PI_WEB_ACCESS_LIVE=1 and a valid EXA_API_KEY to run live tests.
@@ -84,13 +92,16 @@ const { storeResult, getResult, clearResults, generateId } = await import(
 );
 // Import without cache-bust so RequestBudgetExceeded is the same class instance
 // used internally by extract.ts (required for instanceof checks to work).
-const { RequestBudgetExceeded } = await import(
+const { createRequestGuard, RequestBudgetExceeded } = await import(
 	pathToFileURL(join(ROOT, "request-guard.ts")).href
 );
 
 // ── Cleanup ────────────────────────────────────────────────────────────────────
 
 after(() => {
+	// Ensure fetch is restored even if a test failed mid-stub
+	globalThis.fetch = origFetch;
+
 	if (origAgentDir === undefined) delete process.env["PI_CODING_AGENT_DIR"];
 	else process.env["PI_CODING_AGENT_DIR"] = origAgentDir;
 	if (origApiKey === undefined) delete process.env["EXA_API_KEY"];
@@ -102,36 +113,26 @@ after(() => {
 	}
 });
 
-// ── Mock guard factory ─────────────────────────────────────────────────────────
-//
-// Implements the RequestGuard interface (validate + fetch) without touching
-// the network.  validate() always succeeds; fetch() dispatches to canned
-// response handlers by URL prefix and enforces the per-task fetch budget.
+// ── globalThis.fetch stub infrastructure ──────────────────────────────────────
+// Save the real fetch; individual tests install a per-test handler and always
+// restore it so tests remain isolated from one another.
+
+const origFetch = globalThis.fetch;
 
 /**
- * @param {{ maxFetches?: number, handlers?: [string, (url: string) => Response][] }} opts
+ * Replace globalThis.fetch with a stub that dispatches to `handler`.
+ * Returns a teardown function that restores the original.
+ *
+ * @param {(url: string) => Response | Promise<Response>} handler
+ * @returns {() => void}
  */
-function createMockGuard({ maxFetches = 6, handlers = [] } = {}) {
-	let fetchCount = 0;
-	return {
-		async validate(url) {
-			return new URL(url);
-		},
-		async fetch(url, _init) {
-			// Budget check mirrors the real guard: increment first, then compare.
-			fetchCount++;
-			if (fetchCount > maxFetches) {
-				throw new RequestBudgetExceeded(url);
-			}
-			const entry = handlers.find(([prefix]) => url.startsWith(prefix));
-			if (!entry) {
-				throw new Error(`Mock guard: no handler registered for URL: ${url}`);
-			}
-			return entry[1](url);
-		},
-		get count() {
-			return fetchCount;
-		},
+function stubFetch(handler) {
+	globalThis.fetch = async function stubbedFetch(input, _init) {
+		const url = typeof input === "string" ? input : input.url;
+		return handler(url);
+	};
+	return () => {
+		globalThis.fetch = origFetch;
 	};
 }
 
@@ -199,94 +200,190 @@ const CANNED_HTML_B = `<!DOCTYPE html><html lang="en">
 </article>
 </body></html>`;
 
+// ── Shared safe resolver (avoids real DNS in tests that use public-looking URLs)
+// Returns a stable public IP so validate() passes without hitting the network.
+const safeResolver = async (_hostname, _opts) => [
+	{ address: "93.184.216.34", family: 4 },
+];
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 test("web_search: returns expected shape with two canned results and answer", async () => {
-	const guard = createMockGuard({
-		handlers: [
-			["https://api.exa.ai/answer", () => makeJsonResponse(CANNED_EXA_ANSWER)],
-		],
+	const guard = createRequestGuard({ resolver: safeResolver });
+	const restoreFetch = stubFetch((url) => {
+		if (url.startsWith("https://api.exa.ai/answer")) return makeJsonResponse(CANNED_EXA_ANSWER);
+		throw new Error(`Unexpected URL in stub: ${url}`);
 	});
 
-	const result = await searchWithExa("test query", {}, guard);
+	try {
+		const result = await searchWithExa("test query", {}, guard);
 
-	// Must be a real result, not an exhausted-budget sentinel
-	assert.ok(
-		result !== null && !("exhausted" in result),
-		"Expected a SearchResponse, not null or { exhausted: true }",
-	);
-
-	// Answer matches canned data
-	assert.strictEqual(
-		result.answer,
-		CANNED_EXA_ANSWER.answer,
-		"answer must match the canned Exa response",
-	);
-
-	// Two results
-	assert.strictEqual(result.results.length, 2, "Expected exactly 2 results");
-
-	// Each result has required fields
-	for (const r of result.results) {
+		// Must be a real result, not an exhausted-budget sentinel
 		assert.ok(
-			typeof r.url === "string" && r.url.length > 0,
-			`result.url must be non-empty string; got: ${String(r.url)}`,
+			result !== null && !("exhausted" in result),
+			"Expected a SearchResponse, not null or { exhausted: true }",
 		);
-		assert.ok(typeof r.title === "string", "result.title must be a string");
-	}
 
-	// Citations include the URLs from the canned data
-	const urls = result.results.map((r) => r.url);
-	assert.ok(
-		urls.includes("https://example.com/page-a"),
-		`URL 'page-a' missing from citations; got: ${urls.join(", ")}`,
-	);
-	assert.ok(
-		urls.includes("https://example.com/page-b"),
-		`URL 'page-b' missing from citations; got: ${urls.join(", ")}`,
-	);
+		// Answer matches canned data
+		assert.strictEqual(
+			result.answer,
+			CANNED_EXA_ANSWER.answer,
+			"answer must match the canned Exa response",
+		);
+
+		// Two results
+		assert.strictEqual(result.results.length, 2, "Expected exactly 2 results");
+
+		// Each result has required fields
+		for (const r of result.results) {
+			assert.ok(
+				typeof r.url === "string" && r.url.length > 0,
+				`result.url must be non-empty string; got: ${String(r.url)}`,
+			);
+			assert.ok(typeof r.title === "string", "result.title must be a string");
+		}
+
+		// Citations include the URLs from the canned data
+		const urls = result.results.map((r) => r.url);
+		assert.ok(
+			urls.includes("https://example.com/page-a"),
+			`URL 'page-a' missing from citations; got: ${urls.join(", ")}`,
+		);
+		assert.ok(
+			urls.includes("https://example.com/page-b"),
+			`URL 'page-b' missing from citations; got: ${urls.join(", ")}`,
+		);
+	} finally {
+		restoreFetch();
+	}
 });
 
 test("fetch_content: returns extracted markdown from canned HTML bodies", async () => {
-	const guard = createMockGuard({
-		handlers: [
-			["https://example.com/page-a", () => makeHtmlResponse(CANNED_HTML_A)],
-			["https://example.com/page-b", () => makeHtmlResponse(CANNED_HTML_B)],
-		],
+	const guard = createRequestGuard({ resolver: safeResolver });
+	const restoreFetch = stubFetch((url) => {
+		if (url === "https://example.com/page-a") return makeHtmlResponse(CANNED_HTML_A);
+		if (url === "https://example.com/page-b") return makeHtmlResponse(CANNED_HTML_B);
+		throw new Error(`Unexpected URL in stub: ${url}`);
 	});
 
+	try {
+		const results = await fetchAllContent(
+			["https://example.com/page-a", "https://example.com/page-b"],
+			undefined,
+			undefined,
+			guard,
+		);
+
+		assert.strictEqual(results.length, 2, "Expected 2 fetch results");
+
+		// Page A
+		assert.strictEqual(results[0].url, "https://example.com/page-a");
+		assert.strictEqual(
+			results[0].error,
+			null,
+			`Page A must not have an error; got: ${results[0].error}`,
+		);
+		assert.ok(
+			results[0].content.length >= 100,
+			`Page A markdown must be non-trivial; got ${results[0].content.length} chars`,
+		);
+
+		// Page B
+		assert.strictEqual(results[1].url, "https://example.com/page-b");
+		assert.strictEqual(
+			results[1].error,
+			null,
+			`Page B must not have an error; got: ${results[1].error}`,
+		);
+		assert.ok(
+			results[1].content.length >= 100,
+			`Page B markdown must be non-trivial; got ${results[1].content.length} chars`,
+		);
+	} finally {
+		restoreFetch();
+	}
+});
+
+test("scheme rejection: file:// URL returns recoverable error (SchemeDenied)", async () => {
+	// No fetch stub needed: validate() rejects file:// before calling fetch.
+	const guard = createRequestGuard();
 	const results = await fetchAllContent(
-		["https://example.com/page-a", "https://example.com/page-b"],
+		["file:///etc/passwd"],
 		undefined,
 		undefined,
 		guard,
 	);
+	assert.strictEqual(results.length, 1, "Expected one result");
+	assert.ok(
+		typeof results[0].error === "string" && results[0].error.length > 0,
+		`Expected a non-empty error string; got: ${results[0].error}`,
+	);
+	// SchemeDenied message contains "Scheme not allowed"
+	assert.ok(
+		results[0].error.toLowerCase().includes("scheme"),
+		`Error must mention scheme; got: ${results[0].error}`,
+	);
+	assert.strictEqual(results[0].content, "", "Content must be empty on scheme denial");
+});
 
-	assert.strictEqual(results.length, 2, "Expected 2 fetch results");
-
-	// Page A
-	assert.strictEqual(results[0].url, "https://example.com/page-a");
-	assert.strictEqual(
-		results[0].error,
-		null,
-		`Page A must not have an error; got: ${results[0].error}`,
+test("host-deny: 169.254.169.254 literal IP returns recoverable error (HostDenied)", async () => {
+	// No fetch stub needed: validate() rejects the literal cloud-metadata IP.
+	const guard = createRequestGuard();
+	const results = await fetchAllContent(
+		["http://169.254.169.254/latest/meta-data/"],
+		undefined,
+		undefined,
+		guard,
+	);
+	assert.strictEqual(results.length, 1, "Expected one result");
+	assert.ok(
+		typeof results[0].error === "string" && results[0].error.length > 0,
+		`Expected a non-empty error string; got: ${results[0].error}`,
 	);
 	assert.ok(
-		results[0].content.length >= 100,
-		`Page A markdown must be non-trivial; got ${results[0].content.length} chars`,
+		results[0].error.toLowerCase().includes("host denied") ||
+		results[0].error.toLowerCase().includes("private") ||
+		results[0].error.toLowerCase().includes("reserved"),
+		`Error must indicate host is denied; got: ${results[0].error}`,
 	);
+	assert.strictEqual(results[0].content, "", "Content must be empty on host denial");
+});
 
-	// Page B
-	assert.strictEqual(results[1].url, "https://example.com/page-b");
-	assert.strictEqual(
-		results[1].error,
-		null,
-		`Page B must not have an error; got: ${results[1].error}`,
-	);
-	assert.ok(
-		results[1].content.length >= 100,
-		`Page B markdown must be non-trivial; got ${results[1].content.length} chars`,
-	);
+test("size-cap: response with Content-Length > cap returns recoverable error (ResponseTooLarge)", async () => {
+	// 1 byte cap so any real response body exceeds it.
+	const guard = createRequestGuard({ resolver: safeResolver, maxBodyBytes: 1 });
+	const restoreFetch = stubFetch((_url) => {
+		return new Response("this body is longer than 1 byte", {
+			status: 200,
+			headers: {
+				"Content-Type": "text/html",
+				"Content-Length": "31",
+			},
+		});
+	});
+
+	try {
+		const results = await fetchAllContent(
+			["https://example.com/large-page"],
+			undefined,
+			undefined,
+			guard,
+		);
+		assert.strictEqual(results.length, 1);
+		assert.ok(
+			typeof results[0].error === "string" && results[0].error.length > 0,
+			`Expected size-cap error; got: ${results[0].error}`,
+		);
+		assert.ok(
+			results[0].error.toLowerCase().includes("size") ||
+			results[0].error.toLowerCase().includes("large") ||
+			results[0].error.toLowerCase().includes("cap"),
+			`Error must mention size cap; got: ${results[0].error}`,
+		);
+		assert.strictEqual(results[0].content, "");
+	} finally {
+		restoreFetch();
+	}
 });
 
 test("get_search_content: full body is retrievable for a stored result exceeding 30 KB", () => {
@@ -334,56 +431,60 @@ test("get_search_content: full body is retrievable for a stored result exceeding
 	assert.strictEqual(urlData.error, null, "No error on stored large result");
 });
 
-test("per-task fetch budget enforced: search + one URL fetch exhaust maxFetches=2; third fetch throws RequestBudgetExceeded", async () => {
-	const guard = createMockGuard({
-		maxFetches: 2,
-		handlers: [
-			["https://api.exa.ai/answer", () => makeJsonResponse(CANNED_EXA_ANSWER)],
-			["https://example.com/page-a", () => makeHtmlResponse(CANNED_HTML_A)],
-		],
+test("per-task budget enforced via real guard: search + fetch exhaust budget; next throws RequestBudgetExceeded", async () => {
+	// maxFetches=2: first fetch (search API) and second fetch (page-a) succeed;
+	// third fetch (page-b) must be rejected by the REAL guard.
+	const guard = createRequestGuard({ maxFetches: 2, resolver: safeResolver });
+	const restoreFetch = stubFetch((url) => {
+		if (url.startsWith("https://api.exa.ai/answer")) return makeJsonResponse(CANNED_EXA_ANSWER);
+		if (url === "https://example.com/page-a") return makeHtmlResponse(CANNED_HTML_A);
+		if (url === "https://example.com/page-b") return makeHtmlResponse(CANNED_HTML_B);
+		throw new Error(`Unexpected URL in stub: ${url}`);
 	});
 
-	// Fetch 1 — web_search calls guard.fetch once (EXA answer API)
-	const searchResult = await searchWithExa("budget test query", {}, guard);
-	assert.ok(
-		searchResult !== null && !("exhausted" in searchResult),
-		"Search must succeed within budget",
-	);
-	assert.strictEqual(guard.count, 1, "One fetch consumed by the search call");
+	try {
+		// Fetch 1 — web_search calls guard.fetch once (EXA answer API)
+		const searchResult = await searchWithExa("budget test query", {}, guard);
+		assert.ok(
+			searchResult !== null && !("exhausted" in searchResult),
+			"Search must succeed within budget",
+		);
 
-	// Fetch 2 — fetch_content on a single URL
-	const fetchResults = await fetchAllContent(
-		["https://example.com/page-a"],
-		undefined,
-		undefined,
-		guard,
-	);
-	assert.strictEqual(
-		fetchResults[0].error,
-		null,
-		`Content fetch must succeed; got: ${fetchResults[0].error}`,
-	);
-	assert.strictEqual(guard.count, 2, "Two fetches consumed; budget fully used");
+		// Fetch 2 — fetch_content on a single URL
+		const fetchResults = await fetchAllContent(
+			["https://example.com/page-a"],
+			undefined,
+			undefined,
+			guard,
+		);
+		assert.strictEqual(
+			fetchResults[0].error,
+			null,
+			`Content fetch must succeed; got: ${fetchResults[0].error}`,
+		);
 
-	// Fetch 3 — budget exceeded: must throw RequestBudgetExceeded
-	await assert.rejects(
-		() =>
-			fetchAllContent(
-				["https://example.com/page-b"],
-				undefined,
-				undefined,
-				guard,
-			),
-		(err) => {
-			assert.ok(
-				err instanceof RequestBudgetExceeded,
-				`Expected RequestBudgetExceeded, got ${err?.constructor?.name}: ${err?.message}`,
-			);
-			assert.strictEqual(err.code, "budget_exceeded");
-			return true;
-		},
-		"Third fetch must throw RequestBudgetExceeded",
-	);
+		// Fetch 3 — budget exceeded: must throw RequestBudgetExceeded
+		await assert.rejects(
+			() =>
+				fetchAllContent(
+					["https://example.com/page-b"],
+					undefined,
+					undefined,
+					guard,
+				),
+			(err) => {
+				assert.ok(
+					err instanceof RequestBudgetExceeded,
+					`Expected RequestBudgetExceeded, got ${err?.constructor?.name}: ${err?.message}`,
+				);
+				assert.strictEqual(err.code, "budget_exceeded");
+				return true;
+			},
+			"Third fetch must throw RequestBudgetExceeded",
+		);
+	} finally {
+		restoreFetch();
+	}
 });
 
 test("inline content truncated at 30 KB; full body stored and retrievable via get_search_content", () => {
