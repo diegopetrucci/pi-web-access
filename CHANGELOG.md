@@ -23,10 +23,6 @@ Forked from upstream v0.10.7 (commit 076bf0db5e739b200286ca37486e4edd8d19123c).
 - dependencies: unpdf, sqlite cookie store, and any others only used by
   removed code
 
-### Fixed
-- upstream typebox import bug (already shipped in upstream v0.10.7;
-  verified clean install)
-
 ### Changed
 - configuration and cache are rooted under `$PI_CODING_AGENT_DIR`
   (see `paths.ts` and README "Migrating from upstream pi-web-access")
