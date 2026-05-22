@@ -3,12 +3,24 @@
  *
  * Verifies per-task fetch budget enforcement.
  *
- * Strategy:
+ * Sections:
+ *   A. Unit tests on the RequestGuard primitive (guard-instance-level budget).
+ *   B. "Shared across tools" semantics: asserts that a single guard shared
+ *      between web_search-style fetches and fetch_content-style fetches
+ *      correctly enforces a joint budget (simulating Finding 1's requirement
+ *      that counts are shared across tools within a single agent turn).
+ *
+ * Strategy (section A):
  *   1. Spin up a minimal HTTP server on 127.0.0.1 with a random port.
  *   2. Create a guard with maxFetches=2 and extraAllow=['127.0.0.1'] so the
  *      test server's address is not blocked by the loopback deny rule.
  *   3. Assert that the first 2 fetches succeed and the 3rd throws
  *      RequestBudgetExceeded.
+ *
+ * Strategy (section B):
+ *   Simulate web_search consuming 4 fetches, then fetch_content attempting 3
+ *   more against the same shared guard (maxFetches=6).  Assert the 7th fetch
+ *   is rejected — the combined count across both "tools" is what matters.
  */
 
 import { test, before, after } from "node:test";
@@ -91,6 +103,42 @@ test("budget is per-guard-instance (fresh guard has its own budget)", async () =
 	// Both are now exhausted
 	await assert.rejects(() => g1.fetch(`${baseUrl}/`), (err) => err instanceof RequestBudgetExceeded);
 	await assert.rejects(() => g2.fetch(`${baseUrl}/`), (err) => err instanceof RequestBudgetExceeded);
+});
+
+// ── Section B: shared-guard "across tools" semantics ────────────────────────
+
+test("shared guard: budget counted across web_search + fetch_content calls", async () => {
+	// A shared guard as index.ts would create for a single agent turn.
+	// maxFetches=6 is the default; we use maxFetches=6 explicitly for clarity.
+	const sharedGuard = createRequestGuard({ maxFetches: 6, extraAllow: ["127.0.0.1"] });
+
+	// Phase 1 — simulate web_search consuming 4 fetches (e.g. 1 answer API +
+	// 3 result page fetches).
+	for (let i = 0; i < 4; i++) {
+		const r = await sharedGuard.fetch(`${baseUrl}/`);
+		assert.strictEqual(r.status, 200, `Search-phase fetch ${i + 1} must succeed`);
+	}
+
+	// Phase 2 — simulate fetch_content consuming 2 more fetches (budget now at 6).
+	for (let i = 0; i < 2; i++) {
+		const r = await sharedGuard.fetch(`${baseUrl}/`);
+		assert.strictEqual(r.status, 200, `Fetch-content fetch ${i + 1} must succeed`);
+	}
+
+	// Phase 3 — the 7th fetch (from either "tool") must be rejected.
+	// The combined 4+3 = 7 exceeds maxFetches=6.
+	await assert.rejects(
+		() => sharedGuard.fetch(`${baseUrl}/`),
+		(err) => {
+			assert.ok(
+				err instanceof RequestBudgetExceeded,
+				`Expected RequestBudgetExceeded from the shared guard, got ${err?.constructor?.name}: ${err?.message}`,
+			);
+			assert.strictEqual(err.code, "budget_exceeded");
+			return true;
+		},
+		"The 7th fetch across both tool phases must throw RequestBudgetExceeded",
+	);
 });
 
 test("validate() does not count against the fetch budget", async () => {

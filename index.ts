@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { fetchAllContent, type ExtractedContent } from "./extract.js";
 import { searchWithExa, isExaAvailable, type SearchResult } from "./exa.js";
-import { createRequestGuard } from "./request-guard.js";
+import { createRequestGuard, type RequestGuard } from "./request-guard.js";
 import {
 	clearResults,
 	generateId,
@@ -51,6 +51,29 @@ const MAX_INLINE_CONTENT = 30000;
 const pendingFetches = new Map<string, AbortController>();
 let sessionActive = false;
 
+// ── Per-agent-turn shared request guard ───────────────────────────────────────
+// The spec requires that the 6-fetch budget is shared across web_search →
+// fetch_content → get_search_content within a single agent turn, not reset per
+// tool call.  We create/reset the guard on each session_start / session_tree
+// event (the closest Pi lifecycle hooks to an agent turn boundary), and expose
+// it to every tool entry point via getGuard().
+let currentGuard: RequestGuard | undefined;
+let _warnedNoGuard = false;
+
+function getGuard(): RequestGuard {
+	if (currentGuard) return currentGuard;
+	// Fallback: called outside a Pi session (e.g. tests that invoke tool
+	// internals directly).  Create a standalone guard and warn once.
+	if (!_warnedNoGuard) {
+		console.warn(
+			"[pi-web-access] No per-turn guard active; creating a standalone guard. "
+			+ "This is expected in direct-call tests but not in production.",
+		);
+		_warnedNoGuard = true;
+	}
+	return createRequestGuard();
+}
+
 function abortPendingFetches(): void {
 	for (const controller of pendingFetches.values()) {
 		controller.abort();
@@ -64,7 +87,7 @@ export default function (pi: ExtensionAPI) {
 		const fetchId = generateId();
 		const controller = new AbortController();
 		pendingFetches.set(fetchId, controller);
-		const bgGuard = createRequestGuard();
+		const bgGuard = getGuard();
 		fetchAllContent(urls, controller.signal, undefined, bgGuard)
 			.then((fetched) => {
 				if (!sessionActive || !pendingFetches.has(fetchId)) return;
@@ -178,16 +201,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		abortPendingFetches();
 		sessionActive = true;
+		currentGuard = createRequestGuard();
 		restoreFromSession(ctx);
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		abortPendingFetches();
 		sessionActive = true;
+		currentGuard = createRequestGuard();
 		restoreFromSession(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		sessionActive = false;
+		currentGuard = undefined;
 		abortPendingFetches();
 		clearResults();
 	});
@@ -227,7 +253,7 @@ export default function (pi: ExtensionAPI) {
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
 
-			const searchGuard = createRequestGuard();
+			const searchGuard = getGuard();
 
 			for (let i = 0; i < queryList.length; i++) {
 				const query = queryList[i];
@@ -397,7 +423,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchGuard = createRequestGuard();
+			const fetchGuard = getGuard();
 			const fetchResults = await fetchAllContent(urlList, signal, undefined, fetchGuard);
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
