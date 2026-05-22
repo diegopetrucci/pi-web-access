@@ -310,6 +310,17 @@ Set `"enabled": false` under any feature to disable it. Config changes require a
 
 Rate limits: Perplexity is capped at 10 requests/minute (client-side). Content fetches run 3 concurrent with a 30s timeout per URL.
 
+## Migrating from upstream pi-web-access
+
+This fork stores all config and cache under `PI_CODING_AGENT_DIR` (the TLH
+isolated profile directory). It will **not** read `~/.pi/web-search.json`
+automatically. If you have an existing key file there, copy it manually:
+
+```sh
+mkdir -p "${PI_CODING_AGENT_DIR}/extensions/pi-web-access" && \
+  cp ~/.pi/web-search.json "${PI_CODING_AGENT_DIR}/extensions/pi-web-access/settings.json"
+```
+
 ## Limitations
 
 - Chromium cookie extraction for Gemini Web is opt-in via `allowBrowserCookies: true` or `PI_ALLOW_BROWSER_COOKIES=1`. On macOS, enabling it may trigger a Keychain dialog; Linux uses `secret-tool` when available and falls back to Chromium's default password otherwise.
