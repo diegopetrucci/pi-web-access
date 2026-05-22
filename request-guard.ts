@@ -5,13 +5,19 @@
  *
  * Protection layers enforced in order:
  *  1. Scheme allowlist:     only http: and https: are permitted.
- *  2. Depth budget:         max nesting depth per task (default 2).
- *  3. Host-deny list:       enforced AFTER DNS resolution (DNS-rebinding resistant).
+ *  2. Host-deny list:       enforced AFTER DNS resolution (DNS-rebinding resistant).
  *     Covers loopback, RFC 1918, link-local, cloud metadata (169.254.169.254),
  *     ULA, CGNAT, unspecified, and IPv4-mapped IPv6 addresses.
  *     Also blocks *.internal, *.local, *.localhost hostnames.
- *  4. Per-task fetch budget: max HTTP fetches per guard instance (default 6).
- *  5. Per-fetch size cap:    body streamed; aborted if size exceeds cap (default 5 MiB).
+ *  3. Per-task fetch budget: max HTTP fetches per guard instance (default 6).
+ *  4. Per-fetch size cap:    body streamed; aborted if size exceeds cap (default 5 MiB).
+ *
+ * DNS-rebinding TOCTOU mitigation:
+ *  validate() resolves DNS to check the deny list before consuming budget.
+ *  guardedFetch() ALSO re-validates the resolved IP at TCP connect time (via an
+ *  undici Agent custom connect hook) to catch TTL=0 address flips that occur
+ *  between validate() and the actual connection.  The resolved IP from the
+ *  connect-time check is pinned as the TCP target so undici never re-resolves.
  *
  * @testability
  *  - `resolver` option: inject a custom DNS function to simulate DNS responses.
@@ -23,6 +29,10 @@
 
 import dns from "node:dns";
 import net from "node:net";
+import { Agent, buildConnector } from "undici";
+
+// Shared default connector (stateless; safe to reuse across calls).
+const _defaultConnector = buildConnector({});
 
 // ─── Error classes ────────────────────────────────────────────────────────────
 
@@ -199,8 +209,6 @@ export type DnsResolver = (
 export interface RequestGuardOptions {
 	/** Maximum outbound fetches allowed per guard instance. Default: 6. */
 	maxFetches?: number;
-	/** Maximum URL-follow depth per task. Default: 2. */
-	maxDepth?: number;
 	/** Maximum response body bytes before throwing ResponseTooLarge. Default: 5 MiB. */
 	maxBodyBytes?: number;
 	/**
@@ -219,19 +227,20 @@ export interface RequestGuardOptions {
 
 export interface RequestGuard {
 	/**
-	 * Validate a URL against the scheme allowlist, depth budget, and host-deny
-	 * list.  Returns the parsed URL on success.  Throws on any rejection.
+	 * Validate a URL against the scheme allowlist and host-deny list.
+	 * Returns the parsed URL on success.  Throws on any rejection.
 	 */
-	validate(url: string, opts?: { depth?: number }): Promise<URL>;
+	validate(url: string): Promise<URL>;
 	/**
 	 * Perform a guarded fetch: validate URL, count against the task budget,
-	 * perform the HTTP request, and enforce the body size cap.
+	 * perform the HTTP request (with connect-time IP re-validation to close
+	 * the DNS-rebinding TOCTOU window), and enforce the body size cap.
 	 *
 	 * Returns a new Response with the body fully buffered in memory
 	 * (safe to consume with `.text()`, `.json()`, etc.).
 	 * Throws if any guard policy is violated.
 	 */
-	fetch(url: string, init?: RequestInit, opts?: { depth?: number }): Promise<Response>;
+	fetch(url: string, init?: RequestInit): Promise<Response>;
 }
 
 // ─── Default DNS resolver ─────────────────────────────────────────────────────
@@ -247,21 +256,19 @@ function defaultResolver(hostname: string, options: { all: true }) {
  *
  * Default values:
  *   maxFetches   = 6
- *   maxDepth     = 2
  *   maxBodyBytes = 5 MiB  (5 * 1024 * 1024)
  *   resolver     = dns.promises.lookup with { all: true }
  *   extraAllow   = []
  */
 export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 	const maxFetches   = opts?.maxFetches   ?? 6;
-	const maxDepth     = opts?.maxDepth     ?? 2;
 	const maxBodyBytes = opts?.maxBodyBytes ?? 5 * 1024 * 1024;
 	const resolver: DnsResolver = opts?.resolver ?? defaultResolver;
 	const extraAllow   = new Set(opts?.extraAllow ?? []);
 
 	let fetchCount = 0;
 
-	async function validate(url: string, callOpts?: { depth?: number }): Promise<URL> {
+	async function validate(url: string): Promise<URL> {
 		let parsed: URL;
 		try {
 			parsed = new URL(url);
@@ -274,20 +281,14 @@ export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 			throw new SchemeDenied(url);
 		}
 
-		// 2. Depth budget
-		const depth = callOpts?.depth ?? 0;
-		if (depth > maxDepth) {
-			throw new RequestBudgetExceeded(url);
-		}
-
 		const hostname = parsed.hostname;
 
-		// 3a. Hostname suffix deny (fast path, before DNS)
+		// 2a. Hostname suffix deny (fast path, before DNS)
 		if (isHostnameSuffixDenied(hostname)) {
 			throw new HostDenied(url);
 		}
 
-		// 3b. Literal IPv4
+		// 2b. Literal IPv4
 		if (net.isIPv4(hostname)) {
 			if (!extraAllow.has(hostname) && isIPv4Denied(hostname)) {
 				throw new HostDenied(url);
@@ -295,7 +296,7 @@ export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 			return parsed;
 		}
 
-		// 3c. Literal IPv6 (URLs use bracket notation: http://[::1]/)
+		// 2c. Literal IPv6 (URLs use bracket notation: http://[::1]/)
 		if (hostname.startsWith("[") && hostname.endsWith("]")) {
 			const bare = hostname.slice(1, -1);
 			if (net.isIPv6(bare)) {
@@ -306,7 +307,7 @@ export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 			}
 		}
 
-		// 3d. DNS resolution — check every resolved address (rebind-resistant)
+		// 2d. DNS resolution — check every resolved address (rebind-resistant)
 		let addresses: Array<{ address: string; family: number }>;
 		try {
 			addresses = await resolver(hostname, { all: true });
@@ -327,10 +328,9 @@ export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 	async function guardedFetch(
 		url: string,
 		init?: RequestInit,
-		callOpts?: { depth?: number },
 	): Promise<Response> {
-		// Validate (scheme, depth, host-deny) before consuming any budget
-		await validate(url, callOpts);
+		// Validate (scheme, host-deny) before consuming any budget
+		await validate(url);
 
 		// Per-task fetch budget
 		fetchCount++;
@@ -338,61 +338,133 @@ export function createRequestGuard(opts?: RequestGuardOptions): RequestGuard {
 			throw new RequestBudgetExceeded(url);
 		}
 
-		const response = await globalThis.fetch(url, init);
+		// Create a per-request Agent whose connect hook re-validates the resolved
+		// IP at TCP connect time.  This closes the DNS-rebinding TOCTOU window:
+		// a TTL=0 record that flips after validate() is caught here before the
+		// connection is established.  The resolved IP is pinned so undici never
+		// issues a second DNS lookup for this connection.
+		const agent = new Agent({
+			connect(options, callback) {
+				const hostname = options.hostname;
 
-		// Pre-check Content-Length to short-circuit before reading the body
-		const cl = response.headers.get("content-length");
-		if (cl !== null) {
-			const len = parseInt(cl, 10);
-			if (Number.isFinite(len) && len > maxBodyBytes) {
-				response.body?.cancel().catch(() => {});
-				throw new ResponseTooLarge(url);
+				// Literal IPv4 in the URL — just re-check it
+				if (net.isIPv4(hostname)) {
+					if (!extraAllow.has(hostname) && isIPv4Denied(hostname)) {
+						callback(new HostDenied(url), null);
+						return;
+					}
+					_defaultConnector(options, callback);
+					return;
+				}
+
+				// Hostname — resolve and validate at connect time, then pin the IP
+				resolver(hostname, { all: true }).then((addresses) => {
+					for (const { address, family } of addresses) {
+						if (extraAllow.has(address)) continue;
+						if (family === 4 && isIPv4Denied(address)) {
+							callback(new HostDenied(url), null);
+							return;
+						}
+						if (family === 6 && isIPv6Denied(address)) {
+							callback(new HostDenied(url), null);
+							return;
+						}
+					}
+					if (addresses.length > 0) {
+						// Pin the connection to the validated IP.
+						// Preserve the original hostname as TLS SNI so certificate
+						// validation uses the correct server name, not the raw IP.
+						_defaultConnector(
+							{
+								...options,
+								host: addresses[0].address,
+								hostname: addresses[0].address,
+								servername: options.servername ?? hostname,
+							},
+							callback,
+						);
+					} else {
+						_defaultConnector(options, callback);
+					}
+				}).catch(() => {
+					// DNS failure at connect time — let the default connector handle it
+					_defaultConnector(options, callback);
+				});
+			},
+		});
+
+		try {
+			// `dispatcher` is a Node.js (undici-based) fetch extension not in the
+			// standard RequestInit type; cast required.
+			const response = await (globalThis.fetch as (
+				input: string,
+				init?: RequestInit & { dispatcher?: Agent },
+			) => Promise<Response>)(url, { ...init, dispatcher: agent });
+
+			// Pre-check Content-Length to short-circuit before reading the body
+			const cl = response.headers.get("content-length");
+			if (cl !== null) {
+				const len = parseInt(cl, 10);
+				if (Number.isFinite(len) && len > maxBodyBytes) {
+					response.body?.cancel().catch(() => {});
+					throw new ResponseTooLarge(url);
+				}
 			}
-		}
 
-		// Stream body with a running byte counter; abort on cap exceeded
-		const body = response.body;
-		if (!body) {
-			return new Response(null, {
+			// Stream body with a running byte counter; abort on cap exceeded
+			const body = response.body;
+			if (!body) {
+				return new Response(null, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+			}
+
+			const reader = body.getReader();
+			const chunks: Uint8Array[] = [];
+			let total = 0;
+
+			try {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					total += value.byteLength;
+					if (total > maxBodyBytes) {
+						reader.cancel().catch(() => {});
+						throw new ResponseTooLarge(url);
+					}
+					chunks.push(value);
+				}
+			} catch (err) {
+				if (!(err instanceof ResponseTooLarge)) reader.cancel().catch(() => {});
+				throw err;
+			}
+
+			// Reconstruct a fresh Response from the buffered body
+			const buf = new Uint8Array(total);
+			let off = 0;
+			for (const c of chunks) {
+				buf.set(c, off);
+				off += c.byteLength;
+			}
+
+			return new Response(buf, {
 				status: response.status,
 				statusText: response.statusText,
 				headers: response.headers,
 			});
-		}
-
-		const reader = body.getReader();
-		const chunks: Uint8Array[] = [];
-		let total = 0;
-
-		try {
-			for (;;) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				total += value.byteLength;
-				if (total > maxBodyBytes) {
-					reader.cancel().catch(() => {});
-					throw new ResponseTooLarge(url);
-				}
-				chunks.push(value);
-			}
 		} catch (err) {
-			if (!(err instanceof ResponseTooLarge)) reader.cancel().catch(() => {});
+			// Undici wraps connect-time callback errors in TypeError("fetch failed")
+			// with the original error as `.cause`.  Unwrap our HostDenied so
+			// callers see the typed error rather than a generic TypeError.
+			if (err instanceof TypeError && err.cause instanceof HostDenied) {
+				throw err.cause;
+			}
 			throw err;
+		} finally {
+			agent.close().catch(() => {});
 		}
-
-		// Reconstruct a fresh Response from the buffered body
-		const buf = new Uint8Array(total);
-		let off = 0;
-		for (const c of chunks) {
-			buf.set(c, off);
-			off += c.byteLength;
-		}
-
-		return new Response(buf, {
-			status: response.status,
-			statusText: response.statusText,
-			headers: response.headers,
-		});
 	}
 
 	return { validate, fetch: guardedFetch };
