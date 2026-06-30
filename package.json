@@ -1,6 +1,6 @@
 {
-  "name": "pi-web-access",
-  "version": "0.10.7",
+  "name": "@diegopetrucci/pi-web-access",
+  "version": "0.10.8",
   "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent",
   "type": "module",
   "scripts": {
@@ -20,12 +20,24 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicobailon/pi-web-access.git"
+    "url": "git+https://github.com/diegopetrucci/pi-web-access.git"
   },
   "bugs": {
-    "url": "https://github.com/nicobailon/pi-web-access/issues"
+    "url": "https://github.com/diegopetrucci/pi-web-access/issues"
   },
-  "homepage": "https://github.com/nicobailon/pi-web-access#readme",
+  "homepage": "https://github.com/diegopetrucci/pi-web-access#readme",
+  "files": [
+    "*.ts",
+    "skills/**/*",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "banner.png",
+    "pi-web-fetch-demo.mp4"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@mozilla/readability": "^0.5.0",
     "linkedom": "^0.16.0",
@@ -40,6 +52,6 @@
     "skills": [
       "./skills"
     ],
-    "video": "https://github.com/nicobailon/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
+    "video": "https://github.com/diegopetrucci/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
   }
 }

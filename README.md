@@ -6,7 +6,7 @@
 
 **Web search, content extraction, and video understanding for Pi agent. Zero-config Exa search, optional browser-cookie Gemini Web, or bring your own API keys.**
 
-[![npm version](https://img.shields.io/npm/v/pi-web-access?style=for-the-badge)](https://www.npmjs.com/package/pi-web-access)
+[![npm version](https://img.shields.io/npm/v/%40diegopetrucci%2Fpi-web-access?style=for-the-badge)](https://www.npmjs.com/package/@diegopetrucci/pi-web-access)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows*-blue?style=for-the-badge)]()
 
@@ -25,8 +25,10 @@ https://github.com/user-attachments/assets/cac6a17a-1eeb-4dde-9818-cdf85d8ea98f
 ## Install
 
 ```bash
-pi install npm:pi-web-access
+pi install npm:@diegopetrucci/pi-web-access@0.10.8
 ```
+
+For tlh automation, use this exact pinned install target to keep installs reproducible.
 
 Works immediately with no API keys — Exa MCP provides zero-config search. For more providers or direct API access, add keys to `~/.pi/web-search.json`:
 
