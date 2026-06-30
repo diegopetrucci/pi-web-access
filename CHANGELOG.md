@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-06-30
+
+### Changed
+- Prepared the tlh-maintained fork release handoff for the scoped npm package `@diegopetrucci/pi-web-access@0.10.8`, documenting the exact pinned install target `pi install npm:@diegopetrucci/pi-web-access@0.10.8`, Git tag `tlh-v0.10.8`, and human-reviewed publish flow.
+
 ## [0.10.7] - 2026-05-02
 
 ### Added
