@@ -2,11 +2,6 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Box, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { StringEnum, complete, getModel, type Model } from "@mariozechner/pi-ai";
-import { fetchAllContent, type ExtractedContent } from "./extract.js";
-import { clearCloneCache } from "./github-extract.js";
-import { search, type SearchProvider, type ResolvedSearchProvider } from "./gemini-search.js";
-import { executeCodeSearch } from "./code-search.js";
-import type { SearchResult } from "./perplexity.js";
 import { formatSeconds } from "./utils.js";
 import {
 	clearResults,
@@ -20,26 +15,108 @@ import {
 	type StoredSearchData,
 } from "./storage.js";
 import { activityMonitor, type ActivityEntry } from "./activity.js";
-import { startCuratorServer, type CuratorServerHandle } from "./curator-server.js";
-import {
-	buildDeterministicSummary,
-	generateSummaryDraft,
-	type SummaryGenerationContext,
-	type SummaryMeta,
-} from "./summary-review.js";
+import type { CuratorServerHandle } from "./curator-server.js";
+import type { SummaryGenerationContext, SummaryMeta } from "./summary-review.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { platform, homedir } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { isPerplexityAvailable } from "./perplexity.js";
-import { isExaAvailable } from "./exa.js";
-import { isGeminiApiAvailable } from "./gemini-api.js";
-import { getActiveGoogleEmail, isGeminiWebAvailable } from "./gemini-web.js";
 import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
 
 const WEB_SEARCH_CONFIG_PATH = join(homedir(), ".pi", "web-search.json");
+
+type ExtractedContent = import("./extract.js").ExtractedContent;
+type SearchProvider = import("./gemini-search.js").SearchProvider;
+type ResolvedSearchProvider = import("./gemini-search.js").ResolvedSearchProvider;
+type SearchResult = import("./perplexity.js").SearchResult;
+type ExtractModule = typeof import("./extract.js");
+type GithubExtractModule = typeof import("./github-extract.js");
+type SearchModule = typeof import("./gemini-search.js");
+type CodeSearchModule = typeof import("./code-search.js");
+type CuratorServerModule = typeof import("./curator-server.js");
+type SummaryReviewModule = typeof import("./summary-review.js");
+type PerplexityModule = typeof import("./perplexity.js");
+type ExaModule = typeof import("./exa.js");
+type GeminiApiModule = typeof import("./gemini-api.js");
+type GeminiWebModule = typeof import("./gemini-web.js");
+
+type CachedModuleLoader<T> = (() => Promise<T>) & {
+	getLoaded: () => T | undefined;
+	getPending: () => Promise<T> | undefined;
+	whenSettledIfStarted: (onLoad: (module: T) => void) => boolean;
+};
+
+function createCachedModuleLoader<T>(load: () => Promise<T>): CachedModuleLoader<T> {
+	let modulePromise: Promise<T> | undefined;
+	let loadedModule: T | undefined;
+	const loader = (() => {
+		if (!modulePromise) {
+			modulePromise = load()
+				.then((mod) => {
+					loadedModule = mod;
+					return mod;
+				})
+				.catch((err) => {
+					modulePromise = undefined;
+					loadedModule = undefined;
+					throw err;
+				});
+		}
+		return modulePromise;
+	}) as CachedModuleLoader<T>;
+	loader.getLoaded = () => loadedModule;
+	loader.getPending = () => modulePromise;
+	loader.whenSettledIfStarted = (onLoad) => {
+		if (loadedModule) {
+			onLoad(loadedModule);
+			return true;
+		}
+		if (!modulePromise) return false;
+		modulePromise.then(onLoad, () => {});
+		return true;
+	};
+	return loader;
+}
+
+const loadExtractModule = createCachedModuleLoader<ExtractModule>(() => import("./extract.js"));
+const loadGithubExtractModule = createCachedModuleLoader<GithubExtractModule>(() => import("./github-extract.js"));
+const loadSearchModule = createCachedModuleLoader<SearchModule>(() => import("./gemini-search.js"));
+const loadCodeSearchModule = createCachedModuleLoader<CodeSearchModule>(() => import("./code-search.js"));
+const loadCuratorServerModule = createCachedModuleLoader<CuratorServerModule>(() => import("./curator-server.js"));
+const loadSummaryReviewModule = createCachedModuleLoader<SummaryReviewModule>(() => import("./summary-review.js"));
+const loadPerplexityModule = createCachedModuleLoader<PerplexityModule>(() => import("./perplexity.js"));
+const loadExaModule = createCachedModuleLoader<ExaModule>(() => import("./exa.js"));
+const loadGeminiApiModule = createCachedModuleLoader<GeminiApiModule>(() => import("./gemini-api.js"));
+const loadGeminiWebModule = createCachedModuleLoader<GeminiWebModule>(() => import("./gemini-web.js"));
+
+function reportGithubCloneCacheCleanupFailure(err: unknown): void {
+	const message = err instanceof Error ? err.message : String(err);
+	console.error(`[pi-web-access] Failed to clear GitHub clone cache after lazy import: ${message}`);
+}
+
+function withGithubExtractIfStarted(onLoad: (module: GithubExtractModule) => void): void {
+	if (loadGithubExtractModule.whenSettledIfStarted(onLoad)) return;
+
+	if (loadExtractModule.getLoaded()) {
+		void loadGithubExtractModule().then(onLoad).catch(reportGithubCloneCacheCleanupFailure);
+		return;
+	}
+
+	loadExtractModule.whenSettledIfStarted(() => {
+		const githubModule = loadGithubExtractModule.getLoaded();
+		if (githubModule) {
+			onLoad(githubModule);
+			return;
+		}
+		void loadGithubExtractModule().then(onLoad).catch(reportGithubCloneCacheCleanupFailure);
+	});
+}
+
+function clearCloneCacheIfGithubExtractStarted(): void {
+	withGithubExtractIfStarted((githubExtractModule) => githubExtractModule.clearCloneCache());
+}
 
 interface WebSearchConfig {
 	provider?: string;
@@ -149,11 +226,18 @@ function getCuratorTimeoutSeconds(): number {
 }
 
 async function getProviderAvailability(): Promise<ProviderAvailability> {
-	const geminiWebAvail = await isGeminiWebAvailable();
+	const [perplexityModule, exaModule, geminiApiModule] = await Promise.all([
+		loadPerplexityModule(),
+		loadExaModule(),
+		loadGeminiApiModule(),
+	]);
+	const geminiWebAvail = isBrowserCookieAccessAllowed()
+		? await (await loadGeminiWebModule()).isGeminiWebAvailable()
+		: null;
 	return {
-		perplexity: isPerplexityAvailable(),
-		exa: isExaAvailable(),
-		gemini: isGeminiApiAvailable() || !!geminiWebAvail,
+		perplexity: perplexityModule.isPerplexityAvailable(),
+		exa: exaModule.isExaAvailable(),
+		gemini: geminiApiModule.isGeminiApiAvailable() || !!geminiWebAvail,
 	};
 }
 
@@ -197,6 +281,7 @@ const pendingFetches = new Map<string, AbortController>();
 let sessionActive = false;
 let widgetVisible = false;
 let widgetUnsubscribe: (() => void) | null = null;
+let curatorLifecycleVersion = 0;
 let activeCurator: CuratorServerHandle | null = null;
 let glimpseWin: GlimpseWindow | null = null;
 
@@ -204,6 +289,7 @@ interface PendingCurate {
 	phase: "searching" | "curating";
 	workflow: CuratorWorkflow;
 	summaryContext: SummaryGenerationContext;
+	summaryReviewModule: SummaryReviewModule;
 	searchResults: Map<number, QueryResultData>;
 	allInlineContent: ExtractedContent[];
 	queryList: string[];
@@ -228,6 +314,12 @@ let pendingCurate: PendingCurate | null = null;
 
 function cancelPendingCurate(reason: "user" | "stale" = "stale"): void {
 	pendingCurate?.cancel(reason);
+}
+
+function getCuratorStopReason(version: number, signal?: AbortSignal): "user" | "stale" | null {
+	if (signal?.aborted) return "user";
+	if (curatorLifecycleVersion !== version) return "stale";
+	return null;
 }
 
 const MAX_INLINE_CONTENT = 30000; // Content returned directly to agent
@@ -284,6 +376,7 @@ function abortPendingFetches(): void {
 }
 
 function closeCurator(): void {
+	curatorLifecycleVersion += 1;
 	const win = glimpseWin;
 	glimpseWin = null;
 	try { win?.close(); } catch {}
@@ -451,7 +544,7 @@ function formatEntryLine(
 function handleSessionChange(ctx: ExtensionContext): void {
 	abortPendingFetches();
 	closeCurator();
-	clearCloneCache();
+	clearCloneCacheIfGithubExtractStarted();
 	sessionActive = true;
 	restoreFromSession(ctx);
 	// Unsubscribe before clear() to avoid callback with stale ctx
@@ -475,7 +568,8 @@ export default function (pi: ExtensionAPI) {
 		const fetchId = generateId();
 		const controller = new AbortController();
 		pendingFetches.set(fetchId, controller);
-		fetchAllContent(urls, controller.signal)
+		loadExtractModule()
+			.then(({ fetchAllContent }) => fetchAllContent(urls, controller.signal))
 			.then((fetched) => {
 				if (!sessionActive || !pendingFetches.has(fetchId)) return;
 				const data: StoredSearchData = {
@@ -622,6 +716,7 @@ export default function (pi: ExtensionAPI) {
 		selectedQueryIndices: number[],
 		resultsByIndex: Map<number, QueryResultData>,
 		summaryContext: SummaryGenerationContext,
+		summaryReviewModule: SummaryReviewModule,
 		signal?: AbortSignal,
 		modelOverride?: string,
 		feedback?: string,
@@ -635,11 +730,11 @@ export default function (pi: ExtensionAPI) {
 			throw new Error("No selected results available for summary generation");
 		}
 		try {
-			return await generateSummaryDraft(selectedResults, summaryContext, signal, modelOverride, feedback);
+			return await summaryReviewModule.generateSummaryDraft(selectedResults, summaryContext, signal, modelOverride, feedback);
 		} catch (err) {
 			const isEmptyResponse = err instanceof Error && err.message.includes("Summary model returned empty response");
 			if (!isEmptyResponse) throw err;
-			const deterministic = buildDeterministicSummary(selectedResults);
+			const deterministic = summaryReviewModule.buildDeterministicSummary(selectedResults);
 			return {
 				summary: deterministic.summary,
 				meta: {
@@ -712,6 +807,7 @@ export default function (pi: ExtensionAPI) {
 	function resolveSummaryForSubmit(
 		payload: { selectedQueryIndices: number[]; summary?: string; summaryMeta?: SummaryMeta },
 		resultsByIndex: Map<number, QueryResultData>,
+		summaryReviewModule: SummaryReviewModule,
 	): { approvedSummary: string; summaryMeta: SummaryMeta } {
 		const submittedSummary = typeof payload.summary === "string" ? payload.summary.trim() : "";
 		if (submittedSummary.length > 0) {
@@ -723,7 +819,7 @@ export default function (pi: ExtensionAPI) {
 
 		const selected = filterByQueryIndices(payload.selectedQueryIndices, resultsByIndex).results;
 		const fallbackResults = selected.length > 0 ? selected : [...resultsByIndex.values()];
-		const deterministic = buildDeterministicSummary(fallbackResults);
+		const deterministic = summaryReviewModule.buildDeterministicSummary(fallbackResults);
 		return {
 			approvedSummary: deterministic.summary,
 			summaryMeta: deterministic.meta,
@@ -848,6 +944,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function openCuratorBrowser(pc: PendingCurate, searchesComplete = true): Promise<void> {
 		let handle: CuratorServerHandle | null = null;
+		const curatorVersion = curatorLifecycleVersion;
 		try {
 			pc.phase = "curating";
 
@@ -857,6 +954,8 @@ export default function (pi: ExtensionAPI) {
 				: searchAbort.signal;
 
 			const sessionToken = randomUUID();
+			const { startCuratorServer } = await loadCuratorServerModule();
+			if (pendingCurate !== pc || getCuratorStopReason(curatorVersion, pc.signal)) return;
 			handle = await startCuratorServer(
 				{
 					queries: pc.queryList,
@@ -878,6 +977,7 @@ export default function (pi: ExtensionAPI) {
 							selectedQueryIndices,
 							pc.searchResults,
 							pc.summaryContext,
+							pc.summaryReviewModule,
 							summarizeSignal,
 							model,
 							feedback,
@@ -906,7 +1006,7 @@ export default function (pi: ExtensionAPI) {
 							curatedFrom: pc.searchResults.size,
 						};
 						if (!payload.rawResults) {
-							const resolvedSummary = resolveSummaryForSubmit(payload, pc.searchResults);
+							const resolvedSummary = resolveSummaryForSubmit(payload, pc.searchResults, pc.summaryReviewModule);
 							base.workflow = pc.workflow;
 							base.approvedSummary = resolvedSummary.approvedSummary;
 							base.summaryMeta = resolvedSummary.summaryMeta;
@@ -918,7 +1018,7 @@ export default function (pi: ExtensionAPI) {
 						if (pendingCurate !== pc) return;
 						searchAbort.abort();
 						if (reason === "timeout") {
-							const resolvedSummary = resolveSummaryForSubmit({ selectedQueryIndices: [], summary: undefined, summaryMeta: undefined }, pc.searchResults);
+							const resolvedSummary = resolveSummaryForSubmit({ selectedQueryIndices: [], summary: undefined, summaryMeta: undefined }, pc.searchResults, pc.summaryReviewModule);
 							const all = collectAllResultsAndUrls(pc.searchResults);
 							const filteredInline = pc.allInlineContent.filter(c => all.urls.includes(c.url));
 							pc.finish(buildSearchReturn({
@@ -957,7 +1057,7 @@ export default function (pi: ExtensionAPI) {
 							? pc.defaultProvider
 							: normalizedProvider;
 						try {
-							const { answer, results, inlineContent, provider: actualProvider } = await search(query, {
+							const { answer, results, inlineContent, provider: actualProvider } = await (await loadSearchModule()).search(query, {
 								provider: requestedProvider,
 								numResults: pc.numResults,
 								recencyFilter: pc.recencyFilter,
@@ -988,7 +1088,7 @@ export default function (pi: ExtensionAPI) {
 				},
 			);
 
-			if (pendingCurate !== pc) {
+			if (pendingCurate !== pc || getCuratorStopReason(curatorVersion, pc.signal)) {
 				handle.close();
 				return;
 			}
@@ -1033,6 +1133,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			await openInBrowser(pi, handle.url);
 		} catch (err) {
+			if (pendingCurate !== pc || getCuratorStopReason(curatorVersion, pc.signal)) {
+				handle?.close();
+				return;
+			}
 			const message = err instanceof Error ? err.message : String(err);
 			console.error(`Failed to open curator UI: ${message}`);
 			if (pendingCurate === pc || (handle && activeCurator === handle)) {
@@ -1069,14 +1173,14 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => handleSessionChange(ctx));
-	pi.on("session_tree", async (_event, ctx) => handleSessionChange(ctx));
+	pi.on("session_start", (_event, ctx) => handleSessionChange(ctx));
+	pi.on("session_tree", (_event, ctx) => handleSessionChange(ctx));
 
 	pi.on("session_shutdown", () => {
 		sessionActive = false;
 		abortPendingFetches();
 		closeCurator();
-		clearCloneCache();
+		clearCloneCacheIfGithubExtractStarted();
 		clearResults();
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
@@ -1136,6 +1240,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (shouldCurate) {
 				closeCurator();
+				const curatorVersion = curatorLifecycleVersion;
 
 				let resolvePromise: (value: unknown) => void = () => {};
 				const promise = new Promise<unknown>((resolve) => {
@@ -1151,6 +1256,8 @@ export default function (pi: ExtensionAPI) {
 				let cancelled = false;
 
 				const bootstrap = await loadCuratorBootstrap(params.provider);
+				const bootstrapStopReason = getCuratorStopReason(curatorVersion, signal);
+				if (bootstrapStopReason) return buildCurationCancelledReturn(bootstrapStopReason);
 				const availableProviders = bootstrap.availableProviders;
 				const defaultProvider = bootstrap.defaultProvider;
 				const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
@@ -1161,11 +1268,17 @@ export default function (pi: ExtensionAPI) {
 					modelRegistry: ctx.modelRegistry,
 				};
 				const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+				const summaryChoicesStopReason = getCuratorStopReason(curatorVersion, signal);
+				if (summaryChoicesStopReason) return buildCurationCancelledReturn(summaryChoicesStopReason);
+				const summaryReviewModule = await loadSummaryReviewModule();
+				const summaryModuleStopReason = getCuratorStopReason(curatorVersion, signal);
+				if (summaryModuleStopReason) return buildCurationCancelledReturn(summaryModuleStopReason);
 
 				const pc: PendingCurate = {
 					phase: "searching",
 					workflow: curatorWorkflow,
 					summaryContext,
+					summaryReviewModule,
 					searchResults,
 					allInlineContent,
 					queryList,
@@ -1204,6 +1317,9 @@ export default function (pi: ExtensionAPI) {
 				pc.finish = finish;
 				pc.cancel = cancel;
 
+				const beforeOpenStopReason = getCuratorStopReason(curatorVersion, signal);
+				if (beforeOpenStopReason) return buildCurationCancelledReturn(beforeOpenStopReason);
+
 				const onAbort = () => closeCurator();
 				pendingCurate = pc;
 				signal?.addEventListener("abort", onAbort, { once: true });
@@ -1217,7 +1333,7 @@ export default function (pi: ExtensionAPI) {
 					});
 					const requestedProvider = pc.defaultProvider;
 					try {
-						const { answer, results, inlineContent, provider } = await search(queryList[qi], {
+						const { answer, results, inlineContent, provider } = await (await loadSearchModule()).search(queryList[qi], {
 							provider: requestedProvider,
 							numResults: params.numResults,
 							recencyFilter: params.recencyFilter,
@@ -1276,7 +1392,7 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				try {
-					const { answer, results, inlineContent, provider } = await search(query, {
+					const { answer, results, inlineContent, provider } = await (await loadSearchModule()).search(query, {
 						provider: resolvedProvider,
 						numResults: params.numResults,
 						recencyFilter: params.recencyFilter,
@@ -1544,7 +1660,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(toolCallId, params, signal) {
-			return executeCodeSearch(toolCallId, params, signal);
+			return (await loadCodeSearchModule()).executeCodeSearch(toolCallId, params, signal);
 		},
 
 		renderCall(args, theme) {
@@ -1613,7 +1729,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal, {
+			const fetchResults = await (await loadExtractModule()).fetchAllContent(urlList, signal, {
 				forceClone: params.forceClone,
 				prompt: params.prompt,
 				timestamp: params.timestamp,
@@ -1978,6 +2094,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Open web search curator",
 		handler: async (args, ctx) => {
 			closeCurator();
+			const curatorVersion = curatorLifecycleVersion;
 			const sessionToken = randomUUID();
 
 			const raw = args.trim();
@@ -1988,7 +2105,9 @@ export default function (pi: ExtensionAPI) {
 			let bootstrap: CuratorBootstrap;
 			try {
 				bootstrap = await loadCuratorBootstrap(undefined);
+				if (getCuratorStopReason(curatorVersion)) return;
 			} catch (err) {
+				if (getCuratorStopReason(curatorVersion)) return;
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to load web search config: ${message}`, "error");
 				return;
@@ -2002,6 +2121,9 @@ export default function (pi: ExtensionAPI) {
 				modelRegistry: ctx.modelRegistry,
 			};
 			const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+			if (getCuratorStopReason(curatorVersion)) return;
+			const summaryReviewModule = await loadSummaryReviewModule();
+			if (getCuratorStopReason(curatorVersion)) return;
 
 			ctx.ui.notify("Opening web search curator...", "info");
 
@@ -2020,6 +2142,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
+				const { startCuratorServer } = await loadCuratorServerModule();
+				if (getCuratorStopReason(curatorVersion)) return;
 				const handle = await startCuratorServer(
 					{
 						queries,
@@ -2039,6 +2163,7 @@ export default function (pi: ExtensionAPI) {
 								selectedQueryIndices,
 								collected,
 								summaryContext,
+								summaryReviewModule,
 								summarizeSignal,
 								model,
 								feedback,
@@ -2060,7 +2185,7 @@ export default function (pi: ExtensionAPI) {
 								curatedFrom: collected.size,
 							};
 							if (!payload.rawResults) {
-								const resolvedSummary = resolveSummaryForSubmit(payload, collected);
+								const resolvedSummary = resolveSummaryForSubmit(payload, collected, summaryReviewModule);
 								base.workflow = "summary-review";
 								base.approvedSummary = resolvedSummary.approvedSummary;
 								base.summaryMeta = resolvedSummary.summaryMeta;
@@ -2074,7 +2199,7 @@ export default function (pi: ExtensionAPI) {
 							searchAbort.abort();
 							if (reason === "timeout") {
 								const all = collectAllResultsAndUrls(collected);
-								const resolvedSummary = resolveSummaryForSubmit({ selectedQueryIndices: [], summary: undefined, summaryMeta: undefined }, collected);
+								const resolvedSummary = resolveSummaryForSubmit({ selectedQueryIndices: [], summary: undefined, summaryMeta: undefined }, collected, summaryReviewModule);
 								sendFollowUpFromReturn(buildSearchReturn({
 									queryList: all.results.map(r => r.query),
 									results: all.results,
@@ -2110,7 +2235,7 @@ export default function (pi: ExtensionAPI) {
 								? currentProvider
 								: normalizedProvider;
 							try {
-								const { answer, results, provider: actualProvider } = await search(query, {
+								const { answer, results, provider: actualProvider } = await (await loadSearchModule()).search(query, {
 									provider: requestedProvider,
 									signal: searchAbort.signal,
 								});
@@ -2139,6 +2264,11 @@ export default function (pi: ExtensionAPI) {
 						},
 					},
 				);
+
+				if (getCuratorStopReason(curatorVersion)) {
+					handle.close();
+					return;
+				}
 
 				commandHandle = handle;
 				activeCurator = handle;
@@ -2169,7 +2299,7 @@ export default function (pi: ExtensionAPI) {
 							if (aborted || activeCurator !== handle) break;
 							const requestedProvider = currentProvider;
 							try {
-								const { answer, results, provider } = await search(queries[qi], {
+								const { answer, results, provider } = await (await loadSearchModule()).search(queries[qi], {
 									provider: requestedProvider,
 									signal: searchAbort.signal,
 								});
@@ -2193,6 +2323,7 @@ export default function (pi: ExtensionAPI) {
 					if (activeCurator === handle) handle.searchesDone();
 				}
 			} catch (err) {
+				if (getCuratorStopReason(curatorVersion)) return;
 				closeCurator();
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to open curator: ${message}`, "error");
@@ -2253,7 +2384,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const cookies = await isGeminiWebAvailable();
+			const cookies = await (await loadGeminiWebModule()).isGeminiWebAvailable();
 			if (!cookies) {
 				pi.sendMessage({
 					customType: "google-account",
@@ -2264,7 +2395,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const email = await getActiveGoogleEmail(cookies);
+			const email = await (await loadGeminiWebModule()).getActiveGoogleEmail(cookies);
 			const text = email
 				? `Active Google account: ${email}`
 				: "Gemini Web is available, but the active Google account could not be determined.";

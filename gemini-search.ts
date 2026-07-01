@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { activityMonitor } from "./activity.js";
 import { getApiKey, API_BASE, DEFAULT_MODEL } from "./gemini-api.js";
-import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.js";
+import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
 import { isPerplexityAvailable, searchWithPerplexity, type SearchResult, type SearchResponse, type SearchOptions } from "./perplexity.js";
 import { hasExaApiKey, isExaAvailable, searchWithExa } from "./exa.js";
 
@@ -17,6 +17,7 @@ export interface AttributedSearchResponse extends SearchResponse {
 const CONFIG_PATH = join(homedir(), ".pi", "web-search.json");
 
 let cachedSearchConfig: { searchProvider: SearchProvider; searchModel?: string } | null = null;
+let geminiWebModulePromise: Promise<typeof import("./gemini-web.js")> | undefined;
 
 function getSearchConfig(): { searchProvider: SearchProvider; searchModel?: string } {
 	if (cachedSearchConfig) return cachedSearchConfig;
@@ -239,7 +240,20 @@ async function searchWithGeminiApi(query: string, options: SearchOptions = {}): 
 	}
 }
 
+async function loadGeminiWebModule(): Promise<typeof import("./gemini-web.js")> {
+	if (!geminiWebModulePromise) {
+		geminiWebModulePromise = import("./gemini-web.js").catch((err) => {
+			geminiWebModulePromise = undefined;
+			throw err;
+		});
+	}
+	return geminiWebModulePromise;
+}
+
 async function searchWithGeminiWeb(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
+	if (!isBrowserCookieAccessAllowed()) return null;
+
+	const { isGeminiWebAvailable, queryWithCookies } = await loadGeminiWebModule();
 	const cookies = await isGeminiWebAvailable();
 	if (!cookies) return null;
 
