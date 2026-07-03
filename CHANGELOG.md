@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-07-03
+
+### Changed
+- Lazy-loaded startup-heavy web access paths so search, extraction, curator, summary-review, and Gemini Web/browser-cookie modules defer until first use, reducing extension bootstrap cost without changing tool behavior.
+
 ## [0.10.8] - 2026-06-30
 
 ### Changed

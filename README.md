@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/cac6a17a-1eeb-4dde-9818-cdf85d8ea98f
 ## Install
 
 ```bash
-pi install npm:@diegopetrucci/pi-web-access@0.10.8
+pi install npm:@diegopetrucci/pi-web-access@0.10.9
 ```
 
 For tlh automation, use this exact pinned install target to keep installs reproducible.
