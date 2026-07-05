@@ -1,11 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { activityMonitor } from "./activity.js";
 import { getApiKey, API_BASE, DEFAULT_MODEL } from "./gemini-api.js";
 import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
 import { isPerplexityAvailable, searchWithPerplexity, type SearchResult, type SearchResponse, type SearchOptions } from "./perplexity.js";
 import { hasExaApiKey, isExaAvailable, searchWithExa } from "./exa.js";
+import { getWebSearchConfigPath } from "./utils.js";
 
 export type SearchProvider = "auto" | "perplexity" | "gemini" | "exa";
 export type ResolvedSearchProvider = Exclude<SearchProvider, "auto">;
@@ -14,7 +13,7 @@ export interface AttributedSearchResponse extends SearchResponse {
 	provider: ResolvedSearchProvider;
 }
 
-const CONFIG_PATH = join(homedir(), ".pi", "web-search.json");
+const CONFIG_PATH = getWebSearchConfigPath();
 
 let cachedSearchConfig: { searchProvider: SearchProvider; searchModel?: string } | null = null;
 let geminiWebModulePromise: Promise<typeof import("./gemini-web.js")> | undefined;
@@ -119,8 +118,8 @@ export async function search(query: string, options: FullSearchOptions = {}): Pr
 		const result = await searchWithGemini(query, options, true);
 		if (result) return { ...result, provider: "gemini" };
 		throw new Error(
-			"Gemini search unavailable. Either:\n" +
-			"  1. Set GEMINI_API_KEY in ~/.pi/web-search.json\n" +
+			`Gemini search unavailable. Either:\n` +
+			`  1. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
 			"  2. Sign into gemini.google.com in a supported Chromium-based browser"
 		);
 	}
@@ -182,10 +181,10 @@ export async function search(query: string, options: FullSearchOptions = {}): Pr
 	}
 
 	throw new Error(
-		"No search provider available. Either:\n" +
-		"  1. Set perplexityApiKey in ~/.pi/web-search.json\n" +
-		"  2. Set EXA_API_KEY (or exaApiKey) in ~/.pi/web-search.json\n" +
-		"  3. Set GEMINI_API_KEY in ~/.pi/web-search.json\n" +
+		`No search provider available. Either:\n` +
+		`  1. Set perplexityApiKey in ${CONFIG_PATH}\n` +
+		`  2. Set EXA_API_KEY (or exaApiKey) in ${CONFIG_PATH}\n` +
+		`  3. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
 		"  4. Sign into gemini.google.com in a supported Chromium-based browser"
 	);
 }

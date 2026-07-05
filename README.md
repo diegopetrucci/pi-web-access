@@ -6,6 +6,8 @@
 
 **Web search, content extraction, and video understanding for Pi agent. Zero-config Exa search, optional browser-cookie Gemini Web, or bring your own API keys.**
 
+This fork exists to serve **The Last Harness (tlh)**. tlh automation bundles and pins this package for its isolated agent profile, and this fork is not intended as a general standalone distribution target outside that tlh workflow.
+
 [![npm version](https://img.shields.io/npm/v/%40diegopetrucci%2Fpi-web-access?style=for-the-badge)](https://www.npmjs.com/package/@diegopetrucci/pi-web-access)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows*-blue?style=for-the-badge)]()
@@ -30,7 +32,7 @@ pi install npm:@diegopetrucci/pi-web-access@0.10.9
 
 For tlh automation, use this exact pinned install target to keep installs reproducible.
 
-Works immediately with no API keys — Exa MCP provides zero-config search. For more providers or direct API access, add keys to `~/.pi/web-search.json`:
+Works immediately with no API keys — Exa MCP provides zero-config search. On a standard Pi setup, add keys to `~/.pi/web-search.json`. Under The Last Harness (tlh), the extension runs inside the isolated profile pointed to by `$PI_CODING_AGENT_DIR`, so the same config lives at `$PI_CODING_AGENT_DIR/web-search.json` instead:
 
 ```json
 {
@@ -231,7 +233,7 @@ Toggle or configure the curator workflow at runtime.
 /curator summary-review     # explicit workflow
 ```
 
-Persists to `~/.pi/web-search.json` and takes effect on the next `web_search` call. When disabled, `web_search` returns raw results without opening the curator window.
+Persists to the active profile config file and takes effect on the next `web_search` call. On a standard Pi setup that is `~/.pi/web-search.json`; under tlh it is `$PI_CODING_AGENT_DIR/web-search.json`. When disabled, `web_search` returns raw results without opening the curator window.
 
 ### /search
 
@@ -255,7 +257,7 @@ Toggle with **Ctrl+Shift+W** to see live request/response activity:
 
 ## Configuration
 
-All config lives in `~/.pi/web-search.json`. Every field is optional.
+All config lives in the active profile's `web-search.json`. On a standard Pi setup that file is `~/.pi/web-search.json`; under The Last Harness (tlh) it lives in the isolated profile at `$PI_CODING_AGENT_DIR/web-search.json`. Every field is optional.
 
 ```json
 {
@@ -295,7 +297,7 @@ All config lives in `~/.pi/web-search.json`. Every field is optional.
 
 ### Shortcuts
 
-Both shortcuts are configurable via `~/.pi/web-search.json`:
+Both shortcuts are configurable via the active profile config file (`~/.pi/web-search.json` on a standard Pi setup, or `$PI_CODING_AGENT_DIR/web-search.json` under tlh):
 
 ```json
 {
