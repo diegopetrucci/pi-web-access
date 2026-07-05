@@ -287,6 +287,8 @@ function runModuleScript(script, home) {
 	};
 	delete env.PI_ALLOW_BROWSER_COOKIES;
 	delete env.FEYNMAN_ALLOW_BROWSER_COOKIES;
+	delete env.PI_CODING_AGENT_DIR;
+	delete env.XDG_CONFIG_HOME;
 
 	return spawnSync(process.execPath, ["--input-type=module"], {
 		input: script,
@@ -356,7 +358,7 @@ test("google-account keeps Gemini Web and browser-cookie modules unloaded when c
 		assert.deepEqual(globalThis.__loaded, []);
 		assert.deepEqual(globalThis.__calls, []);
 		assert.equal(messages.length, 1);
-		assert.equal(messages[0].message.content[0].text, "Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ~/.pi/web-search.json to enable it.");
+		assert.equal(messages[0].message.content[0].text, ${JSON.stringify(`Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ${join(home, ".pi", "web-search.json")} to enable it.`)});
 		assert.deepEqual(messages[0].message.details, { available: false, cookieAccessAllowed: false });
 
 		console.log(JSON.stringify({
@@ -371,7 +373,7 @@ test("google-account keeps Gemini Web and browser-cookie modules unloaded when c
 	const output = JSON.parse(child.stdout.trim());
 	assert.deepEqual(output.loaded, []);
 	assert.deepEqual(output.calls, []);
-	assert.equal(output.text, "Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ~/.pi/web-search.json to enable it.");
+	assert.equal(output.text, `Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ${join(home, ".pi", "web-search.json")} to enable it.`);
 	assert.deepEqual(output.details, { available: false, cookieAccessAllowed: false });
 });
 
