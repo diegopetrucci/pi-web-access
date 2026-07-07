@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.10] - 2026-07-07
+
+### Fixed
+- Resolved web-search config and Exa usage storage paths from `PI_CODING_AGENT_DIR`, then `XDG_CONFIG_HOME/pi`, then `~/.pi` so The Last Harness isolated profiles do not read or write normal upstream Pi profile config.
+
 ## [0.10.9] - 2026-07-03
 
 ### Changed
