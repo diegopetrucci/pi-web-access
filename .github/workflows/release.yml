@@ -1,0 +1,47 @@
+name: Release to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to publish
+        required: true
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: "Preflight: fail if version is already published"
+        env:
+          TARGET_REF: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+          echo "Preparing to publish ${PACKAGE_NAME}@${PACKAGE_VERSION} from ref ${TARGET_REF}"
+
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+            echo "::error title=Version already published::${PACKAGE_NAME}@${PACKAGE_VERSION} is already available on npm."
+            exit 1
+          fi
+
+      - name: Publish to npm with provenance
+        run: npm publish --access public --provenance
