@@ -1,623 +1,429 @@
-import { Readability } from "@mozilla/readability";
-import { parseHTML } from "linkedom";
-import TurndownService from "turndown";
 import pLimit from "p-limit";
-import { activityMonitor } from "./activity.js";
-import { extractRSCContent } from "./rsc-extract.js";
-import { extractPDFToMarkdown, isPDF } from "./pdf-extract.js";
-import { extractGitHub } from "./github-extract.js";
-import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.js";
-import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.js";
-import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.js";
-import { formatSeconds, getWebSearchConfigPath } from "./utils.js";
+import { activityMonitor } from "./activity.ts";
+import { getFetchTimeoutMs } from "./settings.ts";
+import { fetchRemoteUrl, type FetchImplementation, type Lookup } from "./ssrf-protection.ts";
+import { extractRSCContent } from "./rsc-extract.ts";
+import { sanitizeInlineDataUris } from "./data-uri-sanitize.ts";
 
-const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
-
-const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 30_000;
+const MAX_EXTRACTION_TIMEOUT_MS = 120_000;
 
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
-
-function isConfigParseError(err: unknown): boolean {
-	return errorMessage(err).startsWith("Failed to parse ");
-}
-
-function isAbortError(err: unknown): boolean {
-	return errorMessage(err).toLowerCase().includes("abort");
-}
-
-function abortedResult(url: string): ExtractedContent {
-	return { url, title: "", content: "", error: "Aborted" };
-}
-
-const turndown = new TurndownService({
-	headingStyle: "atx",
-	codeBlockStyle: "fenced",
-});
+/** The transport has its own 5 MiB cap. This smaller stage cap also protects
+ * parsers and the model-visible result from unusually large documents. */
+export const MAX_EXTRACTION_OUTPUT_CHARS = 1_000_000;
+const TRUNCATION_MARKER = "\n\n[Content truncated; use get_search_content for the remaining content.]";
+const MAX_TITLE_CHARS = 1024;
 
 const fetchLimit = pLimit(CONCURRENT_LIMIT);
 
-export interface VideoFrame {
-	data: string;
-	mimeType: string;
-	timestamp: string;
+export interface RegisteredToolNames {
+	webSearch?: string;
+	fetchContent?: string;
 }
-
-export type FrameData = { data: string; mimeType: string };
-export type FrameResult = FrameData | { error: string };
 
 export interface ExtractedContent {
 	url: string;
 	title: string;
 	content: string;
 	error: string | null;
-	thumbnail?: { data: string; mimeType: string };
-	frames?: VideoFrame[];
-	duration?: number;
+	mimeType?: string;
+	status?: number;
 }
 
 export interface ExtractOptions {
+	/** Extraction deadline; transport still applies its independent settings deadline. */
 	timeoutMs?: number;
-	forceClone?: boolean;
-	prompt?: string;
-	timestamp?: string;
-	frames?: number;
-	model?: string;
+	/** Custom DNS resolver used by focused transport/extraction tests. */
+	lookup?: Lookup;
+	/** Explicit transport used by focused extraction/runtime integration tests. */
+	fetch?: FetchImplementation;
+	/** Registered names are used only to make 404/410 guidance actionable. */
+	toolNames?: RegisteredToolNames;
 }
 
-const JINA_READER_BASE = "https://r.jina.ai/";
-const JINA_TIMEOUT_MS = 30000;
-
-async function extractWithJinaReader(
-	url: string,
-	signal?: AbortSignal,
-): Promise<ExtractedContent | null> {
-	const jinaUrl = JINA_READER_BASE + url;
-
-	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
-
-	try {
-		const res = await fetch(jinaUrl, {
-			headers: {
-				"Accept": "text/markdown",
-				"X-No-Cache": "true",
-			},
-			signal: AbortSignal.any([
-				AbortSignal.timeout(JINA_TIMEOUT_MS),
-				...(signal ? [signal] : []),
-			]),
-		});
-
-		if (!res.ok) {
-			activityMonitor.logComplete(activityId, res.status);
-			return null;
-		}
-
-		const content = await res.text();
-		activityMonitor.logComplete(activityId, res.status);
-
-		const contentStart = content.indexOf("Markdown Content:");
-		if (contentStart < 0) {
-			return null;
-		}
-
-		const markdownPart = content.slice(contentStart + 17).trim(); // 17 = "Markdown Content:".length
-
-		// Check for failed JS rendering or minimal content
-		if (markdownPart.length < 100 ||
-			markdownPart.startsWith("Loading...") ||
-			markdownPart.startsWith("Please enable JavaScript")) {
-			return null;
-		}
-
-		const title = extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
-		return { url, title, content: markdownPart, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		if (message.toLowerCase().includes("abort")) {
-			activityMonitor.logComplete(activityId, 0);
-		} else {
-			activityMonitor.logError(activityId, message);
-		}
-		return null;
+class ExtractionDeadlineError extends Error {
+	constructor() {
+		super("The operation was aborted.");
+		this.name = "ExtractionDeadlineError";
 	}
 }
 
-function parseTimestamp(ts: string): number | null {
-	const num = Number(ts);
-	if (!isNaN(num) && num >= 0) return Math.floor(num);
-	const parts = ts.split(":").map(Number);
-	if (parts.some(p => isNaN(p) || p < 0)) return null;
-	if (parts.length === 3) return Math.floor(parts[0] * 3600 + parts[1] * 60 + parts[2]);
-	if (parts.length === 2) return Math.floor(parts[0] * 60 + parts[1]);
-	return null;
+class CallerAbortError extends Error {
+	constructor() {
+		super("Aborted");
+		this.name = "AbortError";
+	}
 }
 
-type TimestampSpec = { type: "single"; seconds: number } | { type: "range"; start: number; end: number };
-
-function parseTimestampSpec(ts: string): TimestampSpec | null {
-	const dashIdx = ts.indexOf("-", 1);
-	if (dashIdx > 0) {
-		const start = parseTimestamp(ts.slice(0, dashIdx));
-		const end = parseTimestamp(ts.slice(dashIdx + 1));
-		if (start !== null && end !== null && end > start) return { type: "range", start, end };
-	}
-	const seconds = parseTimestamp(ts);
-	return seconds !== null ? { type: "single", seconds } : null;
+interface ExtractionDeadline {
+	controller: AbortController;
+	startedAt: number;
+	timeoutMs: number;
+	timedOut: boolean;
+	parentSignal?: AbortSignal;
+	promise: Promise<never>;
+	finish: () => void;
+	assert: () => void;
+	run: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
-const DEFAULT_RANGE_FRAMES = 6;
-const MIN_FRAME_INTERVAL = 5;
-
-function computeRangeTimestamps(start: number, end: number, maxFrames: number = DEFAULT_RANGE_FRAMES): number[] {
-	if (maxFrames <= 1) return [start];
-	const duration = end - start;
-	const idealInterval = duration / (maxFrames - 1);
-	if (idealInterval < MIN_FRAME_INTERVAL) {
-		const timestamps: number[] = [];
-		for (let t = start; t <= end && timestamps.length < maxFrames; t += MIN_FRAME_INTERVAL) {
-			timestamps.push(t);
-		}
-		return timestamps;
-	}
-	return Array.from({ length: maxFrames }, (_, i) => Math.round(start + i * idealInterval));
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
 }
 
-function buildFrameResult(
-	url: string, label: string, requestedCount: number,
-	frames: VideoFrame[], error: string | null, duration?: number,
-): ExtractedContent {
-	if (frames.length === 0) {
-		const msg = error ?? "Frame extraction failed";
-		return { url, title: `Frames ${label} (0/${requestedCount})`, content: msg, error: msg };
+function abortedResult(url: string): ExtractedContent {
+	return { url, title: "", content: "", error: "Aborted" };
+}
+
+function timeoutResult(url: string): ExtractedContent {
+	return { url, title: "", content: "", error: "The operation was aborted." };
+}
+
+function resolveTimeoutMs(options?: Pick<ExtractOptions, "timeoutMs">): number {
+	const configured = options?.timeoutMs ?? getFetchTimeoutMs();
+	if (typeof configured !== "number" || !Number.isFinite(configured) || configured <= 0) {
+		throw new Error("Extraction timeout must be a positive finite number of milliseconds");
 	}
-	return {
-		url,
-		title: `Frames ${label} (${frames.length}/${requestedCount})`,
-		content: `${frames.length} frames extracted from ${label}`,
-		error: null,
-		frames,
-		duration,
+	return Math.min(MAX_EXTRACTION_TIMEOUT_MS, Math.max(1, Math.ceil(configured)));
+}
+
+export function resolveExtractionTimeoutMs(options?: Pick<ExtractOptions, "timeoutMs">): number {
+	return resolveTimeoutMs(options);
+}
+
+function createDeadline(timeoutMs: number, parentSignal?: AbortSignal): ExtractionDeadline {
+	const controller = new AbortController();
+	let timedOut = false;
+	let rejectDeadline: (reason: Error) => void = () => {};
+	const promise = new Promise<never>((_, reject) => { rejectDeadline = reject; });
+	// The race promise is intentionally marked handled. A response body or lazy
+	// parser may finish after a deadline, but it must never create an unhandled
+	// rejection or turn that late completion into a successful extraction.
+	void promise.catch(() => undefined);
+	const startedAt = Date.now();
+	const abortForCaller = () => {
+		if (timedOut) return;
+		controller.abort();
+		rejectDeadline(new CallerAbortError());
 	};
+	const timer = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+		rejectDeadline(new ExtractionDeadlineError());
+	}, timeoutMs);
+	if (parentSignal?.aborted) abortForCaller();
+	else parentSignal?.addEventListener("abort", abortForCaller, { once: true });
+
+	const assert = () => {
+		if (parentSignal?.aborted) throw new CallerAbortError();
+		if (timedOut || Date.now() - startedAt >= timeoutMs) {
+			timedOut = true;
+			controller.abort();
+			throw new ExtractionDeadlineError();
+		}
+		if (controller.signal.aborted) throw new ExtractionDeadlineError();
+	};
+	const run = async <T>(work: () => Promise<T>): Promise<T> => {
+		assert();
+		const task = Promise.resolve().then(work);
+		void task.catch(() => undefined);
+		return Promise.race([task, promise]);
+	};
+	const finish = () => {
+		clearTimeout(timer);
+		parentSignal?.removeEventListener("abort", abortForCaller);
+	};
+	return { controller, startedAt, timeoutMs, timedOut, parentSignal, promise, finish, assert, run };
 }
 
-async function extractLocalFrames(
-	filePath: string, timestamps: number[],
-): Promise<{ frames: VideoFrame[]; error: string | null }> {
-	const results = await Promise.all(timestamps.map(async (t) => {
-		const frame = await extractVideoFrame(filePath, t);
-		if ("error" in frame) return { error: frame.error };
-		return { ...frame, timestamp: formatSeconds(t) };
-	}));
-	const frames = results.filter((f): f is VideoFrame => "data" in f);
-	const firstError = results.find((f): f is { error: string } => "error" in f);
-	return { frames, error: frames.length === 0 && firstError ? firstError.error : null };
-}
-
-function safeVideoInfo(url: string): { info: ReturnType<typeof isVideoFile>; error?: string } {
-	try {
-		return { info: isVideoFile(url) };
-	} catch (err) {
-		return { info: null, error: errorMessage(err) };
-	}
-}
-
-export async function extractContent(
-	url: string,
-	signal?: AbortSignal,
-	options?: ExtractOptions,
-): Promise<ExtractedContent> {
-	if (signal?.aborted) {
-		return { url, title: "", content: "", error: "Aborted" };
-	}
-
-	if (options?.frames && !options.timestamp) {
-		const frameCount = options.frames;
-		const ytInfo = isYouTubeURL(url);
-		if (ytInfo.isYouTube && ytInfo.videoId) {
-			const streamInfo = await getYouTubeStreamInfo(ytInfo.videoId);
-			if ("error" in streamInfo) {
-				return { url, title: "Frames", content: streamInfo.error, error: streamInfo.error };
-			}
-			if (streamInfo.duration === null) {
-				const error = "Cannot determine video duration. Use a timestamp range instead.";
-				return { url, title: "Frames", content: error, error };
-			}
-			const dur = Math.floor(streamInfo.duration);
-			const timestamps = computeRangeTimestamps(0, dur, frameCount);
-			const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
-			const label = `${formatSeconds(0)}-${formatSeconds(dur)}`;
-			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, streamInfo.duration);
-		}
-
-		const localVideo = safeVideoInfo(url);
-		if (localVideo.error) {
-			return { url, title: "", content: "", error: localVideo.error };
-		}
-		if (localVideo.info) {
-			const durationResult = await getLocalVideoDuration(localVideo.info.absolutePath);
-			if (typeof durationResult !== "number") {
-				return { url, title: "Frames", content: durationResult.error, error: durationResult.error };
-			}
-			const dur = Math.floor(durationResult);
-			const timestamps = computeRangeTimestamps(0, dur, frameCount);
-			const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
-			const label = `${formatSeconds(0)}-${formatSeconds(dur)}`;
-			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, durationResult);
-		}
-
-		return { url, title: "", content: "", error: "Frame extraction only works with YouTube and local video files" };
-	}
-
-	if (options?.timestamp) {
-		const spec = parseTimestampSpec(options.timestamp);
-		if (!spec) {
-			return {
-				url,
-				title: "",
-				content: "",
-				error: `Invalid timestamp format: "${options.timestamp}". Use "H:MM:SS", "MM:SS", "85", or "start-end".`,
-			};
-		}
-
-		const frameCount = options.frames;
-		const ytInfo = isYouTubeURL(url);
-		if (ytInfo.isYouTube && ytInfo.videoId) {
-			const streamInfo = await getYouTubeStreamInfo(ytInfo.videoId);
-			if ("error" in streamInfo) {
-				if (spec.type === "range") {
-					const label = `${formatSeconds(spec.start)}-${formatSeconds(spec.end)}`;
-					return { url, title: `Frames ${label}`, content: streamInfo.error, error: streamInfo.error };
-				}
-				if (frameCount) {
-					const end = spec.seconds + (frameCount - 1) * MIN_FRAME_INTERVAL;
-					const label = `${formatSeconds(spec.seconds)}-${formatSeconds(end)}`;
-					return { url, title: `Frames ${label}`, content: streamInfo.error, error: streamInfo.error };
-				}
-				return { url, title: `Frame at ${options.timestamp}`, content: streamInfo.error, error: streamInfo.error };
-			}
-
-			if (spec.type === "range") {
-				const label = `${formatSeconds(spec.start)}-${formatSeconds(spec.end)}`;
-				if (streamInfo.duration !== null && spec.end > streamInfo.duration) {
-					const error = `Timestamp ${formatSeconds(spec.end)} exceeds video duration (${formatSeconds(Math.floor(streamInfo.duration))})`;
-					return { url, title: `Frames ${label}`, content: error, error };
-				}
-				const timestamps = frameCount
-					? computeRangeTimestamps(spec.start, spec.end, frameCount)
-					: computeRangeTimestamps(spec.start, spec.end);
-				const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
-				return buildFrameResult(url, label, timestamps.length, result.frames, result.error, result.duration ?? undefined);
-			}
-
-			if (frameCount) {
-				const end = spec.seconds + (frameCount - 1) * MIN_FRAME_INTERVAL;
-				const label = `${formatSeconds(spec.seconds)}-${formatSeconds(end)}`;
-				if (streamInfo.duration !== null && end > streamInfo.duration) {
-					const error = `Timestamp ${formatSeconds(end)} exceeds video duration (${formatSeconds(Math.floor(streamInfo.duration))})`;
-					return { url, title: `Frames ${label}`, content: error, error };
-				}
-				const timestamps = computeRangeTimestamps(spec.seconds, end, frameCount);
-				const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
-				return buildFrameResult(url, label, timestamps.length, result.frames, result.error, result.duration ?? undefined);
-			}
-
-			if (streamInfo.duration !== null && spec.seconds > streamInfo.duration) {
-				const error = `Timestamp ${formatSeconds(spec.seconds)} exceeds video duration (${formatSeconds(Math.floor(streamInfo.duration))})`;
-				return { url, title: `Frame at ${options.timestamp}`, content: error, error };
-			}
-			const frame = await extractYouTubeFrame(ytInfo.videoId, spec.seconds, streamInfo);
-			if ("error" in frame) {
-				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
-			}
-			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
-		}
-
-		const localVideo = safeVideoInfo(url);
-		if (localVideo.error) {
-			return { url, title: "", content: "", error: localVideo.error };
-		}
-		if (localVideo.info) {
-			if (spec.type === "range") {
-				const timestamps = frameCount
-					? computeRangeTimestamps(spec.start, spec.end, frameCount)
-					: computeRangeTimestamps(spec.start, spec.end);
-				const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
-				const label = `${formatSeconds(spec.start)}-${formatSeconds(spec.end)}`;
-				return buildFrameResult(url, label, timestamps.length, result.frames, result.error);
-			}
-
-			if (frameCount) {
-				const end = spec.seconds + (frameCount - 1) * MIN_FRAME_INTERVAL;
-				const timestamps = computeRangeTimestamps(spec.seconds, end, frameCount);
-				const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
-				const label = `${formatSeconds(spec.seconds)}-${formatSeconds(end)}`;
-				return buildFrameResult(url, label, timestamps.length, result.frames, result.error);
-			}
-
-			const frame = await extractVideoFrame(localVideo.info.absolutePath, spec.seconds);
-			if ("error" in frame) {
-				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
-			}
-			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
-		}
-
-		return { url, title: "", content: "", error: "Timestamp extraction only works with YouTube and local video files" };
-	}
-
-	const localVideo = safeVideoInfo(url);
-	if (localVideo.error) {
-		return { url, title: "", content: "", error: localVideo.error };
-	}
-	if (localVideo.info) {
-		try {
-			const result = await extractVideo(localVideo.info, signal, options);
-			if (signal?.aborted) return abortedResult(url);
-			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${getWebSearchConfigPath()}` };
-		} catch (err) {
-			if (isAbortError(err)) return abortedResult(url);
-			return { url, title: "", content: "", error: errorMessage(err) };
-		}
-	}
-
-	try {
-		new URL(url);
-	} catch {
-		return { url, title: "", content: "", error: "Invalid URL" };
-	}
-
-	try {
-		const ghResult = await extractGitHub(url, signal, options?.forceClone);
-		if (ghResult) return ghResult;
-		if (signal?.aborted) return abortedResult(url);
-	} catch (err) {
-		const message = errorMessage(err);
-		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { url, title: "", content: "", error: message };
-		}
-	}
-
-	const ytInfo = isYouTubeURL(url);
-	let youtubeEnabled = false;
-	try {
-		youtubeEnabled = isYouTubeEnabled();
-	} catch (err) {
-		return { url, title: "", content: "", error: errorMessage(err) };
-	}
-	if (ytInfo.isYouTube && youtubeEnabled) {
-		try {
-			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model);
-			if (ytResult) return ytResult;
-			if (signal?.aborted) return abortedResult(url);
-		} catch (err) {
-			const message = errorMessage(err);
-			if (isAbortError(err)) return abortedResult(url);
-			if (isConfigParseError(err)) {
-				return { url, title: "", content: "", error: message };
-			}
-		}
-		return {
-			url,
-			title: "",
-			content: "",
-			error: "Could not extract YouTube video content. Sign into Google in Chrome for automatic access, or set GEMINI_API_KEY.",
-		};
-	}
-
-	if (signal?.aborted) return abortedResult(url);
-
-	const httpResult = await extractViaHttp(url, signal, options);
-
-	if (signal?.aborted) return abortedResult(url);
-	if (!httpResult.error) return httpResult;
-	if (NON_RECOVERABLE_ERRORS.some(prefix => httpResult.error!.startsWith(prefix))) return httpResult;
-
-	const jinaResult = await extractWithJinaReader(url, signal);
-	if (jinaResult) return jinaResult;
-	if (signal?.aborted) return abortedResult(url);
-
-	let geminiResult: ExtractedContent | null = null;
-	try {
-		geminiResult = await extractWithUrlContext(url, signal)
-			?? await extractWithGeminiWeb(url, signal);
-	} catch (err) {
-		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { ...httpResult, error: errorMessage(err) };
-		}
-	}
-
-	if (geminiResult) return geminiResult;
-	if (signal?.aborted) return abortedResult(url);
-
-	const guidance = [
-		httpResult.error,
-		"",
-		"Fallback options:",
-		`  \u2022 Set GEMINI_API_KEY in ${getWebSearchConfigPath()}`,
-		"  \u2022 Sign into gemini.google.com in Chrome",
-		"  \u2022 Use web_search to find content about this topic",
-	].join("\n");
-	return { ...httpResult, error: guidance };
+function isDeadlineError(err: unknown, deadline: ExtractionDeadline): boolean {
+	return err instanceof ExtractionDeadlineError || deadline.timedOut ||
+		(Date.now() - deadline.startedAt >= deadline.timeoutMs && !deadline.parentSignal?.aborted);
 }
 
 function isLikelyJSRendered(html: string): boolean {
-	// Extract body content
 	const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
 	if (!bodyMatch) return false;
-
-	const bodyHtml = bodyMatch[1];
-
-	// Strip tags to get text content
-	const textContent = bodyHtml
+	const bodyText = bodyMatch[1]
 		.replace(/<script[\s\S]*?<\/script>/gi, "")
 		.replace(/<style[\s\S]*?<\/style>/gi, "")
 		.replace(/<[^>]+>/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
+	return bodyText.length < 500 && (html.match(/<script/gi) || []).length > 3;
+}
 
-	// Count scripts
-	const scriptCount = (html.match(/<script/gi) || []).length;
+function notFoundGuidance(
+	url: string,
+	status: number,
+	statusText: string,
+	toolNames?: RegisteredToolNames,
+): string {
+	const first = `HTTP ${status}: ${statusText || (status === 404 ? "Not Found" : "Gone")}`;
+	const lines = [first, `The origin says this page does not exist (HTTP ${status}).`];
+	if (toolNames?.webSearch && toolNames.fetchContent) {
+		lines.push(`Use ${toolNames.webSearch} to find the current URL, then retry ${toolNames.fetchContent}.`);
+	} else if (toolNames?.webSearch) {
+		lines.push(`Use ${toolNames.webSearch} to find the current URL, then retry the fetch.`);
+	} else {
+		lines.push("Find the current URL and retry the fetch.");
+	}
+	return lines.join("\n");
+}
 
-	// Heuristic: little text content but many scripts suggests JS rendering
-	return textContent.length < 500 && scriptCount > 3;
+function titleFromText(text: string, url: string): string {
+	const heading = extractHeadingTitle(text);
+	if (heading) return heading;
+	try {
+		return new URL(url).pathname.split("/").pop() || url;
+	} catch {
+		return url;
+	}
+}
+
+function boundTextByLines(text: string, maxChars = MAX_EXTRACTION_OUTPUT_CHARS): string {
+	if (text.length <= maxChars) return text;
+	const marker = maxChars > TRUNCATION_MARKER.length ? TRUNCATION_MARKER : "[truncated]";
+	const budget = Math.max(0, maxChars - marker.length);
+	const end = text.lastIndexOf("\n", budget);
+	if (end <= 0) return `${text.slice(0, budget).trimEnd()}${marker}`.slice(0, maxChars);
+	return `${text.slice(0, end).trimEnd()}${marker}`.slice(0, maxChars);
+}
+
+/** Keep a bounded result at a complete line where possible. */
+export function boundExtractedText(text: string, maxChars = MAX_EXTRACTION_OUTPUT_CHARS): string {
+	if (!Number.isInteger(maxChars) || maxChars <= 0) throw new Error("Text bound must be a positive integer");
+	return boundTextByLines(text, maxChars);
+}
+
+function sanitizeResult(result: ExtractedContent): ExtractedContent {
+	if (!result.content) return result;
+	const sanitized = sanitizeInlineDataUris(result.content, "content");
+	const content = boundTextByLines(sanitized.text);
+	return content === result.content ? result : { ...result, content };
+}
+
+interface HtmlTools {
+	parseHTML: (html: string) => { document: unknown };
+	Readability: new (document: Document) => { parse: () => { title?: string; content?: string } | null };
+	turndown: { turndown: (html: string) => string };
+}
+
+let htmlToolsPromise: Promise<HtmlTools> | undefined;
+async function loadHtmlTools(): Promise<HtmlTools> {
+	const [{ parseHTML }, readabilityModule, turndownModule] = await Promise.all([
+		import("linkedom"),
+		import("@mozilla/readability"),
+		import("turndown"),
+	]);
+	const TurndownService = turndownModule.default;
+	return {
+		parseHTML: parseHTML as HtmlTools["parseHTML"],
+		Readability: readabilityModule.Readability as unknown as HtmlTools["Readability"],
+		turndown: new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" }),
+	};
+}
+
+function getHtmlTools(): Promise<HtmlTools> {
+	htmlToolsPromise ??= loadHtmlTools();
+	return htmlToolsPromise;
+}
+
+function isDefuddleConsoleError(args: unknown[]): boolean {
+	const prefix = args[0];
+	return prefix === "Defuddle" || (typeof prefix === "string" && /^Defuddle(?:\s|:)/.test(prefix));
+}
+
+async function extractWithDefuddle(
+	text: string,
+	url: string,
+	parseHTML: HtmlTools["parseHTML"],
+): Promise<{ title: string; content: string } | null> {
+	const { Defuddle } = await import("defuddle/node");
+	const { document } = parseHTML(text);
+	Object.defineProperty(document, "location", {
+		value: new URL(url),
+		configurable: true,
+	});
+
+	let processingError: unknown;
+	const originalConsoleError = console.error;
+	console.error = (...args: unknown[]) => {
+		if (isDefuddleConsoleError(args)) {
+			if (args[0] === "Defuddle" && args[1] === "Error processing document:") processingError = args[2];
+			return;
+		}
+		originalConsoleError(...args);
+	};
+	let resultPromise: Promise<{ title?: unknown; content?: unknown }>;
+	try {
+		// Defuddle's synchronous mode parses before returning its promise, so the
+		// console interception stays local and does not swallow unrelated output.
+		resultPromise = Defuddle(document as unknown as Document, url, { markdown: true, useAsync: false }) as Promise<{ title?: unknown; content?: unknown }>;
+	} finally {
+		console.error = originalConsoleError;
+	}
+	const result = await resultPromise;
+	if (processingError !== undefined) throw new Error(`Defuddle failed to process document: ${errorMessage(processingError)}`);
+	return typeof result.content === "string"
+		? { title: typeof result.title === "string" ? result.title : "", content: result.content }
+		: null;
+}
+
+async function cancelResponse(response: Response): Promise<void> {
+	try { await response.body?.cancel(); } catch {}
+}
+
+function extractionResult(
+	url: string,
+	title: string,
+	content: string,
+	error: string | null,
+	status?: number,
+	mimeType?: string,
+): ExtractedContent {
+	return {
+		url,
+		title: title.slice(0, MAX_TITLE_CHARS),
+		content,
+		error,
+		...(typeof status === "number" ? { status } : {}),
+		...(mimeType ? { mimeType } : {}),
+	};
 }
 
 async function extractViaHttp(
 	url: string,
-	signal?: AbortSignal,
-	options?: ExtractOptions,
+	signal: AbortSignal | undefined,
+	options: ExtractOptions | undefined,
 ): Promise<ExtractedContent> {
-	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
-
-	const controller = new AbortController();
-	const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-	const onAbort = () => controller.abort();
-	signal?.addEventListener("abort", onAbort);
+	let deadline: ExtractionDeadline;
+	try {
+		deadline = createDeadline(resolveTimeoutMs(options), signal);
+	} catch (err) {
+		const message = errorMessage(err);
+		activityMonitor.logError(activityId, message);
+		return extractionResult(url, "", "", message);
+	}
 
 	try {
-		const response = await fetch(url, {
-			signal: controller.signal,
+		const response = await deadline.run(() => fetchRemoteUrl(url, {
+			signal: deadline.controller.signal,
 			headers: {
-				"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
 				"Accept-Language": "en-US,en;q=0.9",
 				"Cache-Control": "no-cache",
-				"Sec-Fetch-Dest": "document",
-				"Sec-Fetch-Mode": "navigate",
-				"Sec-Fetch-Site": "none",
-				"Sec-Fetch-User": "?1",
-				"Upgrade-Insecure-Requests": "1",
 			},
-		});
+		}, {
+			...(options?.lookup ? { lookup: options.lookup } : {}),
+			...(options?.fetch ? { fetch: options.fetch } : {}),
+		}));
+		deadline.assert();
 
-		if (!response.ok) {
-			activityMonitor.logComplete(activityId, response.status);
-			return {
-				url,
-				title: "",
-				content: "",
-				error: `HTTP ${response.status}: ${response.statusText}`,
-			};
-		}
-
-		const contentLengthHeader = response.headers.get("content-length");
 		const contentType = response.headers.get("content-type") || "";
-		const isPDFContent = isPDF(url, contentType);
-		const maxResponseSize = isPDFContent ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
-		if (contentLengthHeader) {
-			const contentLength = parseInt(contentLengthHeader, 10);
-			if (contentLength > maxResponseSize) {
-				activityMonitor.logComplete(activityId, response.status);
-				return {
-					url,
-					title: "",
-					content: "",
-					error: `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)`,
-				};
-			}
-		}
-
-		if (isPDFContent) {
-			try {
-				const buffer = await response.arrayBuffer();
-				const result = await extractPDFToMarkdown(buffer, url);
-				activityMonitor.logComplete(activityId, response.status);
-				return {
-					url,
-					title: result.title,
-					content: `PDF extracted and saved to: ${result.outputPath}\n\nPages: ${result.pages}\nCharacters: ${result.chars}`,
-					error: null,
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				activityMonitor.logError(activityId, message);
-				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
-			}
-		}
-
-		if (contentType.includes("application/octet-stream") ||
-			contentType.includes("image/") ||
-			contentType.includes("audio/") ||
-			contentType.includes("video/") ||
-			contentType.includes("application/zip")) {
+		const normalizedContentType = contentType.toLowerCase();
+		const mimeType = normalizedContentType.split(";", 1)[0]?.trim() || undefined;
+		if (!response.ok) {
+			await cancelResponse(response);
 			activityMonitor.logComplete(activityId, response.status);
-			return {
-				url,
-				title: "",
-				content: "",
-				error: `Unsupported content type: ${contentType.split(";")[0]}`,
-			};
+			const error = response.status === 404 || response.status === 410
+				? notFoundGuidance(url, response.status, response.statusText, options?.toolNames)
+				: `HTTP ${response.status}: ${response.statusText}`;
+			return extractionResult(url, "", "", error, response.status, mimeType);
 		}
 
-		const text = await response.text();
-		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
+		if (normalizedContentType.includes("application/octet-stream") ||
+			normalizedContentType.includes("image/") ||
+			normalizedContentType.includes("audio/") ||
+			normalizedContentType.includes("video/") ||
+			normalizedContentType.includes("application/zip") ||
+			normalizedContentType.includes("application/pdf")) {
+			await cancelResponse(response);
+			activityMonitor.logComplete(activityId, response.status);
+			return extractionResult(url, "", "", `Unsupported content type: ${mimeType || contentType}`, response.status, mimeType);
+		}
 
+		const text = await deadline.run(() => response.text());
+		deadline.assert();
+		const isHTML = normalizedContentType.includes("text/html") || normalizedContentType.includes("application/xhtml+xml");
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
-			const title = extractTextTitle(text, url);
-			return { url, title, content: text, error: null };
+			return extractionResult(url, titleFromText(text, url), text, null, response.status, mimeType);
 		}
 
-		const { document } = parseHTML(text);
-		const reader = new Readability(document as unknown as Document);
-		const article = reader.parse();
+		const tools = await deadline.run(() => getHtmlTools());
+		deadline.assert();
+		const { document } = tools.parseHTML(text);
+		deadline.assert();
+		const documentTitle = typeof (document as { title?: unknown }).title === "string"
+			? (document as { title: string }).title.trim()
+			: "";
+		const article = new tools.Readability(document as Document).parse();
+		deadline.assert();
 
-		if (!article) {
+		let title = article?.title || documentTitle;
+		let content = article?.content ? tools.turndown.turndown(article.content) : "";
+		deadline.assert();
+
+		if (!article || content.length < MIN_USEFUL_CONTENT) {
 			const rscResult = extractRSCContent(text);
-			if (rscResult) {
+			deadline.assert();
+			if (rscResult && rscResult.content.length >= MIN_USEFUL_CONTENT) {
 				activityMonitor.logComplete(activityId, response.status);
-				return { url, title: rscResult.title, content: rscResult.content, error: null };
+				return extractionResult(url, rscResult.title || title, rscResult.content, null, response.status, mimeType);
 			}
 
-			activityMonitor.logComplete(activityId, response.status);
+			let defuddleResult: { title: string; content: string } | null = null;
+			try {
+				defuddleResult = await deadline.run(() => extractWithDefuddle(text, response.url || url, tools.parseHTML));
+				deadline.assert();
+			} catch (err) {
+				// A fallback parser must not discard a usable Readability result or
+				// expose parser internals. Deadline/caller aborts still belong to the
+				// outer operation and are deliberately rethrown.
+				if (signal?.aborted || deadline.controller.signal.aborted) throw err;
+			}
+			if (defuddleResult && defuddleResult.content.length >= MIN_USEFUL_CONTENT) {
+				activityMonitor.logComplete(activityId, response.status);
+				return extractionResult(url, title || defuddleResult.title, defuddleResult.content, null, response.status, mimeType);
+			}
+		}
 
-			// Provide more specific error message
-			const jsRendered = isLikelyJSRendered(text);
-			const errorMsg = jsRendered
+		activityMonitor.logComplete(activityId, response.status);
+		if (!article) {
+			const error = isLikelyJSRendered(text)
 				? "Page appears to be JavaScript-rendered (content loads dynamically)"
 				: "Could not extract readable content from HTML structure";
-
-			return {
-				url,
-				title: "",
-				content: "",
-				error: errorMsg,
-			};
+			return extractionResult(url, documentTitle, "", error, response.status, mimeType);
 		}
-
-		const markdown = turndown.turndown(article.content);
-		activityMonitor.logComplete(activityId, response.status);
-
-		if (markdown.length < MIN_USEFUL_CONTENT) {
-			return {
-				url,
-				title: article.title || "",
-				content: markdown,
-				error: isLikelyJSRendered(text)
-					? "Page appears to be JavaScript-rendered (content loads dynamically)"
-					: "Extracted content appears incomplete",
-			};
+		if (content.length < MIN_USEFUL_CONTENT) {
+			const error = isLikelyJSRendered(text)
+				? "Page appears to be JavaScript-rendered (content loads dynamically)"
+				: "Extracted content appears incomplete";
+			return extractionResult(url, title, content, error, response.status, mimeType);
 		}
-
-		return { url, title: article.title || "", content: markdown, error: null };
+		return extractionResult(url, title, content, null, response.status, mimeType);
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		if (message.toLowerCase().includes("abort")) {
+		const message = errorMessage(err);
+		if (signal?.aborted || err instanceof CallerAbortError) {
+			activityMonitor.logComplete(activityId, 0);
+			return abortedResult(url);
+		}
+		if (isDeadlineError(err, deadline)) {
+			activityMonitor.logComplete(activityId, 0);
+			return timeoutResult(url);
+		}
+		if (message.toLowerCase().includes("abort") || message.toLowerCase().includes("timed out")) {
 			activityMonitor.logComplete(activityId, 0);
 		} else {
 			activityMonitor.logError(activityId, message);
 		}
-		return { url, title: "", content: "", error: message };
+		return extractionResult(url, "", "", message);
 	} finally {
-		clearTimeout(timeoutId);
-		signal?.removeEventListener("abort", onAbort);
+		deadline.finish();
 	}
 }
 
@@ -628,8 +434,20 @@ export function extractHeadingTitle(text: string): string | null {
 	return cleaned || null;
 }
 
-function extractTextTitle(text: string, url: string): string {
-	return extractHeadingTitle(text) ?? (new URL(url).pathname.split("/").pop() || url);
+export async function extractContent(
+	url: string,
+	signal?: AbortSignal,
+	options?: ExtractOptions,
+): Promise<ExtractedContent> {
+	if (signal?.aborted) return abortedResult(url);
+	try {
+		new URL(url);
+	} catch {
+		return extractionResult(url, "", "", "Invalid URL");
+	}
+	if (signal?.aborted) return abortedResult(url);
+	const result = await extractViaHttp(url, signal, options);
+	return sanitizeResult(result);
 }
 
 export async function fetchAllContent(

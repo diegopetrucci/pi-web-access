@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to publish
+        description: Release tag (must match tlh-v<package-version>)
         required: true
-        default: main
 
 permissions:
   contents: read
@@ -19,13 +18,28 @@ jobs:
       - name: Check out selected ref
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: refs/tags/${{ inputs.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies from lockfile
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Audit runtime dependencies
+        run: npm run audit:runtime
+
+      - name: Verify deterministic npm package shape
+        run: npm run package:check
 
       - name: "Preflight: fail if version is already published"
         env:
@@ -37,6 +51,25 @@ jobs:
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
 
           echo "Preparing to publish ${PACKAGE_NAME}@${PACKAGE_VERSION} from ref ${TARGET_REF}"
+
+          EXPECTED_REF="tlh-v${PACKAGE_VERSION}"
+          if [[ "${TARGET_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "::error title=Invalid release ref::Expected ${EXPECTED_REF}, got ${TARGET_REF}."
+            exit 1
+          fi
+
+          TAG_REF="refs/tags/${TARGET_REF}"
+          if ! git show-ref --verify --quiet "${TAG_REF}"; then
+            echo "::error title=Missing release tag::${TAG_REF} does not exist after checkout."
+            exit 1
+          fi
+
+          TAG_COMMIT="$(git rev-parse --verify "${TAG_REF}^{commit}")"
+          HEAD_COMMIT="$(git rev-parse --verify HEAD)"
+          if [[ "${TAG_COMMIT}" != "${HEAD_COMMIT}" ]]; then
+            echo "::error title=Release tag mismatch::${TAG_REF} resolves to ${TAG_COMMIT}, but checkout is ${HEAD_COMMIT}."
+            exit 1
+          fi
 
           if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
             echo "::error title=Version already published::${PACKAGE_NAME}@${PACKAGE_VERSION} is already available on npm."

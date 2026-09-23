@@ -1,54 +1,46 @@
 # Releasing
 
-This is the evergreen release doc for the `pi-web-access` fork maintained for
-The Last Harness (tlh). It describes the default way to publish
-`@diegopetrucci/pi-web-access` to npm.
+This is the evergreen release procedure for the The Last Harness (tlh) fork and
+`@diegopetrucci/pi-web-access`. The npm package is a selective Exa-only port;
+its release tag is `tlh-v0.29.1` for this handoff.
 
-## Default: GitHub Actions trusted publishing
+## Trusted publishing
 
-The default publish path is the **Release to npm** workflow
-(`.github/workflows/release.yml`), dispatched manually from GitHub Actions:
+Use the **Release to npm** workflow (`.github/workflows/release.yml`) through
+GitHub Actions `workflow_dispatch`:
 
-1. Trigger the workflow via `workflow_dispatch`.
-2. Provide the workflow input `ref` (the release tag, e.g. `tlh-v0.10.11`).
-   `ref` defaults to `main` if left blank, but releases should always pass the
-   actual release tag.
-3. The workflow checks out that ref, sets up Node 20, and runs a preflight
-   step that fails the run if `package.json`'s `name@version` is already
-   published on npm.
-4. If preflight passes, the workflow publishes with
-   `npm publish --access public --provenance`, using npm trusted publishing
-   (OIDC) — no npm token is stored in this repo or in CI secrets.
+1. Merge the release changes and create/push the release tag, normally
+   `tlh-v<version>`.
+2. Dispatch **Release to npm** with the required `ref=<release tag>` input.
+   The workflow requires the exact `tlh-v<package-version>` value and rejects
+   branches, `main`, and mismatched tags.
+3. The workflow checks out the tag, uses Node 24, runs `npm ci`, `npm test`,
+   `npm run typecheck`, `npm run audit:runtime`, and `npm run package:check`,
+   then fails if the exact `name@version` is already on npm.
+4. On success it runs `npm publish --access public --provenance`.
 
-This requires the trusted publisher to be configured on npmjs.com for
-`@diegopetrucci/pi-web-access`, pointing at repo
-`diegopetrucci/pi-web-access` and workflow `release.yml`.
+The workflow keeps `contents: read` and `id-token: write` only. npm trusted
+publishing must be configured for package
+`@diegopetrucci/pi-web-access`, repository
+`diegopetrucci/pi-web-access`, workflow `release.yml`. No npm token belongs in
+repository secrets.
 
-## Fallback: human-shell `npm publish`
+`package:check` runs an npm dry-run and asserts the exact package file set:
+`package.json`, the required runtime TypeScript files, `README.md`,
+`CHANGELOG.md`, `SECURITY.md`, `NOTICE`, and `LICENSE`. Tests, docs, skills,
+media, `.gnosis`, `.tickets`, lockfiles, and release artifacts must remain out
+of the tarball.
 
-Running `npm publish` from a human shell session is **not** the default
-anymore. Keep it only as an explicit, called-out fallback for when CI trusted
-publishing is unavailable (e.g. the workflow itself is broken or npm's OIDC
-publishing is down). If you use the fallback, say so explicitly in the
-release checklist and record why CI wasn't used.
+## Human fallback
 
-## Guidance for future publish checklists
+A shell `npm publish` is not the default. Use it only when trusted publishing
+is unavailable, record the reason in the release handoff, and preserve
+`--access public --provenance` where the local npm version supports provenance.
 
-Per-release publish checklists (`docs/publish-checklist-v*.md`) should
-include a **"Trusted publishing handoff"** section instead of the older
-"Stop before npm publish" human-only section. That section should:
+## Post-publication follow-up
 
-- Note that publishing happens via the existing trusted publishing workflow
-  in `.github/workflows/release.yml`, and that `npm publish` should not be
-  run from a human shell session.
-- Include a checklist item to run the GitHub Actions workflow **Release to
-  npm**.
-- Include a checklist item recording the workflow input used, e.g.
-  `ref=<release tag>`.
-- Include a checklist item confirming the workflow preflight reports the
-  version is not already published.
-- Include a checklist item confirming the workflow completes
-  `npm publish --access public --provenance`.
-
-See `diegopetrucci/pi-mcp-adapter`'s `docs/publish-checklist-v2.10.2.md` (at
-commit `f82b0a5`) for an example of this section's wording.
+After npm propagation, verify the package and the exact install target. Then,
+in a separately authorized change to the external tlh repository, update its
+pin to `@diegopetrucci/pi-web-access@0.29.1` and remove or correct obsolete
+curator/search documentation. This repository release does not edit that
+external repository or pin.

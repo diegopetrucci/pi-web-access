@@ -1,338 +1,276 @@
-/**
- * RSC Content Extractor
- * 
- * Extracts readable content from Next.js React Server Components (RSC) flight payloads.
- * RSC pages embed content as JSON in <script>self.__next_f.push([...])</script> tags.
- */
-
 export interface RSCExtractResult {
-  title: string;
-  content: string;
+	title: string;
+	content: string;
+}
+
+const MAX_RSC_SCRIPTS = 64;
+const MAX_RSC_CHUNKS = 256;
+const MAX_RSC_CHUNK_CHARS = 512_000;
+const MAX_RSC_CHARS = 1_000_000;
+const MAX_RSC_RENDER_NODES = 100_000;
+const MAX_RSC_RECURSION_DEPTH = 128;
+const RSC_SCRIPT = /<script\b[^>]*>\s*self\.__next_f\.push\(\s*\[\s*1\s*,\s*("(?:\\.|[^"\\])*")\s*\]\s*\)\s*<\/script>/gi;
+const SKIP_TAGS = new Set(["script", "style", "svg", "path", "circle", "link", "meta", "template", "button", "input", "nav", "footer", "aside"]);
+
+function cap(text: string): string {
+	return text.length > MAX_RSC_CHARS ? text.slice(0, MAX_RSC_CHARS) : text;
+}
+
+function clean(text: string): string {
+	return cap(text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim());
+}
+
+function titleFromHtml(html: string): string {
+	const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+	return (match?.[1] || "")
+		.replace(/<[^>]+>/g, "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.split("|")[0]
+		?.trim() || "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function uniqueBlocks(text: string): string {
+	const blocks = clean(text).split(/\n{2,}/);
+	const seen = new Set<string>();
+	const unique: string[] = [];
+	for (const rawBlock of blocks) {
+		const block = rawBlock.trim();
+		if (!block) continue;
+		const key = block.replace(/\s+/g, " ").slice(0, 300);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		unique.push(block);
+	}
+	return clean(unique.join("\n\n"));
+}
+
+interface RenderBudget {
+	remainingOutput: number;
+	remainingNodes: number;
+	depth: number;
+}
+
+interface RenderState {
+	budget: RenderBudget;
+	refs: Set<string>;
+}
+
+interface RenderOutput {
+	chunks: string[];
+}
+
+function appendOutput(output: RenderOutput, state: RenderState, text: string): void {
+	if (!text || state.budget.remainingOutput <= 0) return;
+	const length = Math.min(text.length, state.budget.remainingOutput);
+	output.chunks.push(length === text.length ? text : text.slice(0, length));
+	state.budget.remainingOutput -= length;
+}
+
+function outputText(output: RenderOutput): string {
+	return output.chunks.join("");
 }
 
 export function extractRSCContent(html: string): RSCExtractResult | null {
-  if (!html.includes("self.__next_f.push")) {
-    return null;
-  }
+	if (!html.includes("self.__next_f.push")) return null;
 
-  // Parse all RSC chunks into a map
-  const chunkMap = new Map<string, string>();
-  const scriptRegex = /<script>self\.__next_f\.push\(\[1,"([\s\S]*?)"\]\)<\/script>/g;
+	const chunks = new Map<string, string>();
+	let totalChunkChars = 0;
+	let scriptCount = 0;
+	for (const match of html.matchAll(RSC_SCRIPT)) {
+		if (++scriptCount > MAX_RSC_SCRIPTS) break;
+		let scriptText: string;
+		try {
+			scriptText = JSON.parse(match[1]);
+		} catch {
+			continue;
+		}
+		if (typeof scriptText !== "string" || scriptText.length > MAX_RSC_CHUNK_CHARS * 4) continue;
 
-  for (const match of html.matchAll(scriptRegex)) {
-    let content: string;
-    try {
-      content = JSON.parse('"' + match[1] + '"');
-    } catch {
-      continue;
-    }
+		for (const line of scriptText.split("\n")) {
+			if (chunks.size >= MAX_RSC_CHUNKS && !line.startsWith("23:")) break;
+			const colon = line.indexOf(":");
+			if (colon <= 0 || colon > 8) continue;
+			const id = line.slice(0, colon).toLowerCase();
+			if (!/^[0-9a-f]+$/.test(id)) continue;
+			const payload = line.slice(colon + 1);
+			if (!payload || payload.length > MAX_RSC_CHUNK_CHARS) continue;
+			const previous = chunks.get(id);
+			if (previous && previous.length >= payload.length) continue;
+			if (!previous && totalChunkChars + payload.length > MAX_RSC_CHUNK_CHARS * 8) continue;
+			totalChunkChars += payload.length - (previous?.length || 0);
+			chunks.set(id, payload);
+		}
+	}
+	if (chunks.size === 0) return null;
 
-    // Parse each line as "id:payload"
-    // Lines are separated by \n, each line is one chunk
-    // Chunk IDs are hex strings, typically 1-4 chars (supports up to 65535 chunks)
-    for (const line of content.split("\n")) {
-      if (!line.trim()) continue;
-      
-      const colonIdx = line.indexOf(":");
-      if (colonIdx <= 0 || colonIdx > 4) continue;
-      
-      const id = line.slice(0, colonIdx);
-      if (!/^[0-9a-f]+$/i.test(id)) continue;
-      
-      const payload = line.slice(colonIdx + 1);
-      if (!payload) continue;
-      
-      const existing = chunkMap.get(id);
-      if (!existing || payload.length > existing.length) {
-        chunkMap.set(id, payload);
-      }
-    }
-  }
+	const parsed = new Map<string, unknown | null>();
+	const getChunk = (id: string): unknown | null => {
+		const key = id.toLowerCase();
+		if (parsed.has(key)) return parsed.get(key) ?? null;
+		const payload = chunks.get(key);
+		if (!payload || !/^[\[{"\d-]/.test(payload)) {
+			parsed.set(key, null);
+			return null;
+		}
+		try {
+			const value = JSON.parse(payload) as unknown;
+			parsed.set(key, value);
+			return value;
+		} catch {
+			parsed.set(key, null);
+			return null;
+		}
+	};
 
-  if (chunkMap.size === 0) return null;
+	const render = (node: unknown, state: RenderState, output: RenderOutput, code = false): void => {
+		if (state.budget.remainingOutput <= 0 || state.budget.remainingNodes <= 0) return;
+		state.budget.remainingNodes--;
+		if (state.budget.depth >= MAX_RSC_RECURSION_DEPTH) return;
+		state.budget.depth++;
+		try {
+			if (node === null || node === undefined || typeof node === "boolean") return;
+			if (typeof node === "number") {
+				appendOutput(output, state, String(node));
+				return;
+			}
+			if (typeof node === "string") {
+				const reference = node.match(/^\$L([0-9a-f]{1,8})$/i);
+				if (reference) {
+					const id = reference[1].toLowerCase();
+					if (state.refs.has(id)) return;
+					const value = getChunk(id);
+					if (value === null) return;
+					state.refs.add(id);
+					try {
+						render(value, state, output, code);
+					} finally {
+						state.refs.delete(id);
+					}
+					return;
+				}
+				if (!code && (node === "$" || node === "$undefined" || /^\$[A-Z]/.test(node))) return;
+				appendOutput(output, state, node);
+				return;
+			}
+			if (!Array.isArray(node)) return;
 
-  // Extract title
-  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/);
-  const title = titleMatch?.[1]?.split("|")[0]?.trim() || "";
+			if (node[0] === "$" && typeof node[1] === "string") {
+				const tag = node[1];
+				const props = isRecord(node[3]) ? node[3] : {};
+				if (SKIP_TAGS.has(tag)) return;
+				if (tag.startsWith("$L")) {
+					const id = tag.slice(2).toLowerCase();
+					if (state.refs.has(id)) return;
+					const value = getChunk(id);
+					if (value !== null) {
+						state.refs.add(id);
+						try {
+							render(value, state, output, code);
+						} finally {
+							state.refs.delete(id);
+						}
+					} else {
+						render(props.children, state, output, code);
+					}
+					return;
+				}
 
-  // Parse and cache parsed chunks
-  const parsedCache = new Map<string, unknown>();
-  
-  function getParsedChunk(id: string): unknown | null {
-    if (parsedCache.has(id)) return parsedCache.get(id);
-    
-    const chunk = chunkMap.get(id);
-    if (!chunk || !chunk.startsWith("[")) {
-      parsedCache.set(id, null);
-      return null;
-    }
-    
-    try {
-      const parsed = JSON.parse(chunk);
-      parsedCache.set(id, parsed);
-      return parsed;
-    } catch {
-      parsedCache.set(id, null);
-      return null;
-    }
-  }
+				if (tag === "pre") {
+					appendOutput(output, state, "```\n");
+					render(props.children, state, output, true);
+					appendOutput(output, state, "\n```\n\n");
+					return;
+				}
+				if (tag === "code") {
+					if (!code) appendOutput(output, state, "`");
+					render(props.children, state, output, true);
+					if (!code) appendOutput(output, state, "`");
+					return;
+				}
 
-  // Extract markdown from nodes, resolving refs on the fly
-  type Node = unknown;
-  const visitedRefs = new Set<string>();
+				if (/^h[1-6]$/.test(tag)) appendOutput(output, state, `${"#".repeat(Number(tag[1]))} `);
+				else if (tag === "li") appendOutput(output, state, "- ");
+				else if (tag === "blockquote") appendOutput(output, state, "> ");
+				else if (tag === "strong" || tag === "b") appendOutput(output, state, "**");
+				else if (tag === "em" || tag === "i") appendOutput(output, state, "*");
 
-  function extractNode(node: Node, ctx = { inTable: false, inCode: false }): string {
-    if (node === null || node === undefined) return "";
-    
-    if (typeof node === "string") {
-      // Check if it's a reference like "$L30"
-      const refMatch = node.match(/^\$L([0-9a-f]+)$/i);
-      if (refMatch) {
-        const refId = refMatch[1];
-        if (visitedRefs.has(refId)) return ""; // Prevent cycles
-        visitedRefs.add(refId);
-        const refNode = getParsedChunk(refId);
-        const result = refNode ? extractNode(refNode, ctx) : "";
-        visitedRefs.delete(refId);
-        return result;
-      }
-      // Filter out RSC-specific artifacts, but preserve content inside code blocks
-      if (!ctx.inCode && (node === "$undefined" || node === "$" || /^\$[A-Z]/.test(node))) return "";
-      return node.trim() ? node : "";
-    }
-    
-    if (typeof node === "number") return String(node);
-    if (typeof node === "boolean") return "";
-    if (!Array.isArray(node)) return "";
+				render(props.children, state, output, code);
 
-    // RSC element: ["$", "tag", key, props]
-    if (node[0] === "$" && typeof node[1] === "string") {
-      const tag = node[1] as string;
-      const props = (node[3] || {}) as Record<string, unknown>;
+				if (/^h[1-6]$/.test(tag) || tag === "p" || tag === "article" || tag === "section" || tag === "main" || tag === "div" || tag === "blockquote") {
+					appendOutput(output, state, "\n\n");
+				} else if (tag === "br" || tag === "li") {
+					appendOutput(output, state, "\n");
+				} else if (tag === "ul" || tag === "ol") {
+					appendOutput(output, state, "\n");
+				} else if (tag === "strong" || tag === "b") {
+					appendOutput(output, state, "**");
+				} else if (tag === "em" || tag === "i") {
+					appendOutput(output, state, "*");
+				}
+				return;
+			}
 
-      // Skip non-content
-      const skipTags = ["script", "style", "svg", "path", "circle", "link", "meta", 
-                        "template", "button", "input", "nav", "footer", "aside"];
-      if (skipTags.includes(tag)) return "";
+			for (let index = 0; index < node.length; index++) {
+				if (state.budget.remainingOutput <= 0 || state.budget.remainingNodes <= 0) break;
+				render(node[index], state, output, code);
+			}
+		} finally {
+			state.budget.depth--;
+		}
+	};
 
-      // Component ref like $L25
-      if (tag.startsWith("$L")) {
-        const refId = tag.slice(2);
-        if (visitedRefs.has(refId)) return "";
-        
-        // Check for heading components with baseId
-        if (props.baseId && props.children) {
-          return `## ${String(props.children)}\n\n`;
-        }
-        
-        visitedRefs.add(refId);
-        const refNode = getParsedChunk(refId);
-        let result = "";
-        if (refNode) {
-          result = extractNode(refNode, ctx);
-        } else if (props.children) {
-          result = extractNode(props.children as Node, ctx);
-        }
-        visitedRefs.delete(refId);
-        return result;
-      }
+	const state: RenderState = {
+		budget: {
+			remainingOutput: MAX_RSC_CHARS,
+			remainingNodes: MAX_RSC_RENDER_NODES,
+			depth: 0,
+		},
+		refs: new Set(),
+	};
+	const renderChunk = (value: unknown): string => {
+		const output: RenderOutput = { chunks: [] };
+		render(value, state, output);
+		return outputText(output);
+	};
 
-      const children = props.children;
-      const content = children ? extractNode(children as Node, ctx) : "";
+	const title = titleFromHtml(html);
+	const main = getChunk("23");
+	if (main !== null) {
+		const content = uniqueBlocks(renderChunk(main));
+		if (content.length > 100) return { title, content };
+	}
 
-      switch (tag) {
-        case "h1": return `# ${content.trim()}\n\n`;
-        case "h2": return `## ${content.trim()}\n\n`;
-        case "h3": return `### ${content.trim()}\n\n`;
-        case "h4": return `#### ${content.trim()}\n\n`;
-        case "h5": return `##### ${content.trim()}\n\n`;
-        case "h6": return `###### ${content.trim()}\n\n`;
-        case "p": return ctx.inTable ? content : `${content.trim()}\n\n`;
-        case "code": {
-          const codeContent = children ? extractNode(children as Node, { ...ctx, inCode: true }) : "";
-          return ctx.inCode ? codeContent : `\`${codeContent}\``;
-        }
-        case "pre": {
-          const preContent = children ? extractNode(children as Node, { ...ctx, inCode: true }) : "";
-          return "```\n" + preContent + "\n```\n\n";
-        }
-        case "strong": case "b": return `**${content}**`;
-        case "em": case "i": return `*${content}*`;
-        case "li": return `- ${content.trim()}\n`;
-        case "ul": case "ol": return content + "\n";
-        case "blockquote": return `> ${content.trim()}\n\n`;
-        case "table": return extractTable(node as unknown[]) + "\n";
-        case "thead": case "tbody": case "tr": case "th": case "td":
-          return content;
-        case "div":
-          if (props.role === "alert" || props["data-slot"] === "alert") {
-            return `> ${content.trim()}\n\n`;
-          }
-          return content;
-        case "a": {
-          const href = props.href as string | undefined;
-          return href && !href.startsWith("#") ? `[${content}](${href})` : content;
-        }
-        default: return content;
-      }
-    }
+	const parts: { order: number; text: string }[] = [];
+	for (const [id] of chunks) {
+		if (state.budget.remainingOutput <= 0 || state.budget.remainingNodes <= 0) break;
+		if (id === "23") continue;
+		const value = getChunk(id);
+		if (value === null) continue;
+		state.refs.clear();
+		const text = uniqueBlocks(renderChunk(value));
+		if (text.length <= 50 || /page was not found|\b404\b/i.test(text)) continue;
+		parts.push({ order: Number.parseInt(id, 16), text });
+	}
+	parts.sort((a, b) => a.order - b.order);
 
-    // Array of child nodes
-    return (node as Node[]).map(n => extractNode(n, ctx)).join("");
-  }
-
-  function extractTable(tableNode: unknown[]): string {
-    const props = (tableNode[3] || {}) as Record<string, unknown>;
-    const rows: string[][] = [];
-    let headerRowCount = 0;
-
-    function walkTable(node: unknown, isHeader = false): void {
-      if (node === null || node === undefined) return;
-      
-      // Handle string refs
-      if (typeof node === "string") {
-        const refMatch = node.match(/^\$L([0-9a-f]+)$/i);
-        if (refMatch && !visitedRefs.has(refMatch[1])) {
-          visitedRefs.add(refMatch[1]);
-          const refNode = getParsedChunk(refMatch[1]);
-          if (refNode) walkTable(refNode, isHeader);
-          visitedRefs.delete(refMatch[1]);
-        }
-        return;
-      }
-      
-      if (!Array.isArray(node)) return;
-      
-      if (node[0] === "$") {
-        const tag = node[1] as string;
-        const nodeProps = (node[3] || {}) as Record<string, unknown>;
-        
-        // Handle component refs
-        if (tag.startsWith("$L")) {
-          const refId = tag.slice(2);
-          if (!visitedRefs.has(refId)) {
-            visitedRefs.add(refId);
-            const refNode = getParsedChunk(refId);
-            if (refNode) walkTable(refNode, isHeader);
-            visitedRefs.delete(refId);
-          }
-          return;
-        }
-        
-        if (tag === "thead") walkTable(nodeProps.children, true);
-        else if (tag === "tbody") walkTable(nodeProps.children, false);
-        else if (tag === "tr") {
-          const cells: string[] = [];
-          walkCells(nodeProps.children, cells);
-          if (cells.length > 0) {
-            rows.push(cells);
-            if (isHeader) headerRowCount++;
-          }
-        } else walkTable(nodeProps.children, isHeader);
-      } else {
-        for (const child of node) walkTable(child, isHeader);
-      }
-    }
-
-    function walkCells(node: unknown, cells: string[]): void {
-      if (node === null || node === undefined) return;
-      
-      // Handle string refs
-      if (typeof node === "string") {
-        const refMatch = node.match(/^\$L([0-9a-f]+)$/i);
-        if (refMatch && !visitedRefs.has(refMatch[1])) {
-          visitedRefs.add(refMatch[1]);
-          const refNode = getParsedChunk(refMatch[1]);
-          if (refNode) walkCells(refNode, cells);
-          visitedRefs.delete(refMatch[1]);
-        }
-        return;
-      }
-      
-      if (!Array.isArray(node)) return;
-      
-      if (node[0] === "$" && (node[1] === "td" || node[1] === "th")) {
-        const cellProps = (node[3] || {}) as Record<string, unknown>;
-        const text = extractNode(cellProps.children, { inTable: true, inCode: false })
-          .trim()
-          .replace(/\n/g, " ")
-          .replace(/\\/g, "\\\\")  // Escape backslashes first
-          .replace(/\|/g, "\\|");  // Then escape pipes
-        cells.push(text);
-      } else if (node[0] === "$" && typeof node[1] === "string" && (node[1] as string).startsWith("$L")) {
-        // Component ref for a cell
-        const refId = (node[1] as string).slice(2);
-        if (!visitedRefs.has(refId)) {
-          visitedRefs.add(refId);
-          const refNode = getParsedChunk(refId);
-          if (refNode) walkCells(refNode, cells);
-          visitedRefs.delete(refId);
-        }
-      } else {
-        for (const child of node) walkCells(child, cells);
-      }
-    }
-
-    walkTable(props.children);
-    if (rows.length === 0) return "";
-
-    const colCount = Math.max(...rows.map(r => r.length));
-    let md = "";
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i].concat(Array(colCount - rows[i].length).fill(""));
-      md += "| " + row.join(" | ") + " |\n";
-      if (i === headerRowCount - 1 || (headerRowCount === 0 && i === 0)) {
-        md += "| " + Array(colCount).fill("---").join(" | ") + " |\n";
-      }
-    }
-    return md;
-  }
-
-  // Process main content chunk (usually "23")
-  const mainChunk = getParsedChunk("23");
-  
-  if (mainChunk) {
-    const content = extractNode(mainChunk);
-    if (content.trim().length > 100) {
-      const cleaned = content
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-      return { title, content: cleaned };
-    }
-  }
-
-  // Fallback: try other chunks
-  const contentParts: { order: number; text: string }[] = [];
-
-  for (const [id] of chunkMap) {
-    if (id === "23") continue;
-    const parsed = getParsedChunk(id);
-    if (!parsed) continue;
-
-    visitedRefs.clear();
-    const text = extractNode(parsed);
-
-    if (text.trim().length > 50 && 
-        !text.includes("page was not found") && 
-        !text.includes("404")) {
-      contentParts.push({ order: parseInt(id, 16), text: text.trim() });
-    }
-  }
-
-  if (contentParts.length === 0) return null;
-
-  contentParts.sort((a, b) => a.order - b.order);
-  
-  const seen = new Set<string>();
-  const uniqueParts: string[] = [];
-  for (const part of contentParts) {
-    const key = part.text.slice(0, 150);
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueParts.push(part.text);
-    }
-  }
-
-  const content = uniqueParts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
-  return content.length > 100 ? { title, content } : null;
+	const combined: string[] = [];
+	let combinedLength = 0;
+	for (const part of parts) {
+		if (combinedLength >= MAX_RSC_CHARS) break;
+		if (combined.length > 0) {
+			combined.push("\n\n");
+			combinedLength += 2;
+		}
+		const remaining = MAX_RSC_CHARS - combinedLength;
+		const text = part.text.slice(0, remaining);
+		combined.push(text);
+		combinedLength += text.length;
+	}
+	const content = uniqueBlocks(combined.join(""));
+	return content.length > 100 ? { title, content } : null;
 }

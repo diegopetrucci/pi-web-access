@@ -1,10 +1,16 @@
 {
   "name": "@diegopetrucci/pi-web-access",
-  "version": "0.10.10",
-  "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent",
+  "version": "0.29.1",
+  "description": "Web search and URL fetching for the tlh coding agent (Exa provider)",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "typecheck": "tsc",
+    "audit:runtime": "npm audit --omit=dev",
+    "package:check": "node --test test/package-shape.test.mjs"
   },
   "keywords": [
     "pi-package",
@@ -12,7 +18,6 @@
     "pi-coding-agent",
     "extension",
     "web-search",
-    "perplexity",
     "fetch",
     "scraping"
   ],
@@ -27,31 +32,45 @@
   },
   "homepage": "https://github.com/diegopetrucci/pi-web-access#readme",
   "files": [
-    "*.ts",
-    "skills/**/*",
+    "activity.ts",
+    "data-uri-sanitize.ts",
+    "exa.ts",
+    "extract.ts",
+    "index.ts",
+    "request-budget.ts",
+    "rsc-extract.ts",
+    "settings.ts",
+    "ssrf-protection.ts",
+    "storage.ts",
+    "web-tools.ts",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE",
-    "banner.png",
-    "pi-web-fetch-demo.mp4"
+    "SECURITY.md",
+    "NOTICE",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
   },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.86.1",
+    "@earendil-works/pi-coding-agent": "0.86.1",
+    "@earendil-works/pi-tui": "0.86.1",
+    "@types/turndown": "^5.0.6",
+    "typescript": "^7.0.2"
+  },
   "dependencies": {
-    "@mozilla/readability": "^0.5.0",
+    "@mozilla/readability": "^0.6.0",
+    "defuddle": "0.19.3",
     "linkedom": "^0.16.0",
     "p-limit": "^6.1.0",
     "turndown": "^7.2.0",
-    "unpdf": "^1.6.2"
+    "typebox": "^1.1.38",
+    "undici": "^8.9.0"
   },
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "./skills"
-    ],
-    "video": "https://github.com/diegopetrucci/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
+    ]
   }
 }

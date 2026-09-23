@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-09-22
+
+This is a selective The Last Harness security/token-efficiency port through upstream commit `192ac18`, not upstream v0.29.0 feature parity.
+
+### Changed
+
+- Reduced the public surface to the Exa-only `web_search`, `fetch_content`, and `get_search_content` tools.
+- Isolated settings and fetched-content cache under the required absolute `PI_CODING_AGENT_DIR`, with bounded output, storage, SSRF, redirect, timeout, and six-operation protections.
+- Prepared the public scoped package, trusted-publishing checks, and `tlh-v0.29.1` handoff. The external tlh pin and obsolete curator/search docs remain a separate post-publication follow-up.
+
+Entries below describe superseded releases and are not the v0.29.1 capability surface.
+
 ## [0.10.10] - 2026-07-07
 
 ### Fixed
