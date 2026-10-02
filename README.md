@@ -1,6 +1,6 @@
 # The Last Harness Web Access
 
-`@diegopetrucci/pi-web-access@0.29.1` is a **The Last Harness (tlh)** selective fork for the compatible upstream Pi coding-agent runtime. It is a security and token-efficiency port based on upstream `nicobailon/pi-web-access@192ac18` (the upstream v0.29.0 release-preparation commit). It is **not** feature parity with upstream v0.29.0.
+`@diegopetrucci/pi-web-access@0.29.2` is a **The Last Harness (tlh)** selective fork for the compatible upstream Pi coding-agent runtime. It is a security and token-efficiency port based on upstream `nicobailon/pi-web-access@192ac18` (the upstream v0.29.0 release-preparation commit). It is **not** feature parity with upstream v0.29.0.
 
 Only Exa search and bounded local URL extraction are included. The package registers exactly three tools, requires an isolated `PI_CODING_AGENT_DIR`, and does not provide the broader upstream provider, media, repository, browser-cookie, curator, or summary workflows.
 
@@ -9,7 +9,7 @@ Only Exa search and bounded local URL extraction are included. The package regis
 In the compatible upstream Pi coding-agent runtime:
 
 ```bash
-pi install npm:@diegopetrucci/pi-web-access@0.29.1
+pi install npm:@diegopetrucci/pi-web-access@0.29.2
 ```
 
 Requires Node.js **>=22.19.0**. Set an absolute profile path before using any tool:
@@ -99,7 +99,7 @@ This release does not register or ship `code_search`, `source_check`, aliases, c
 
 ## Remove or undo
 
-To undo the installation, remove `@diegopetrucci/pi-web-access@0.29.1` from the compatible host runtime using its package manager. Then remove only the package-owned profile data if it is no longer needed:
+To undo the installation, remove `@diegopetrucci/pi-web-access@0.29.2` from the compatible host runtime using its package manager. Then remove only the package-owned profile data if it is no longer needed:
 
 ```bash
 rm -f "$PI_CODING_AGENT_DIR/extensions/pi-web-access/settings.json"
@@ -110,6 +110,6 @@ Unset `PI_CODING_AGENT_DIR` or remove the extension through the host runtime if 
 
 ## Release handoff
 
-The intended tag is `tlh-v0.29.1`. This repository does not change the external tlh repository, its package pin, or its obsolete curator/search documentation. After publication, update that external repository in a separately authorized follow-up to pin `@diegopetrucci/pi-web-access@0.29.1` and remove or correct those obsolete docs.
+The intended tag is `tlh-v0.29.2`. This repository does not change the external tlh repository, its package pin, or its obsolete curator/search documentation. After publication, update that external repository in a separately authorized follow-up to pin `@diegopetrucci/pi-web-access@0.29.2` and remove or correct those obsolete docs.
 
 See [`SECURITY.md`](SECURITY.md) for reporting guidance and the [repository release procedure](https://github.com/diegopetrucci/pi-web-access/blob/main/docs/RELEASING.md) for the trusted-publishing handoff.
