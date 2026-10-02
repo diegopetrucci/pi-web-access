@@ -8,6 +8,7 @@ import {
 	requireAgentDir,
 } from "./settings.ts";
 import { resetRequestOperations } from "./request-budget.ts";
+import { prepareWebSearchArguments } from "./tool-arguments.ts";
 
 const MAX_QUERIES = 4;
 const MAX_RESULTS = 10;
@@ -108,6 +109,7 @@ export default function register(pi: ExtensionAPI): void {
 			label: "Web Search",
 			description: "Search the web with Exa and return source citations.",
 			promptSnippet: "Use for one focused web search.",
+			prepareArguments: prepareWebSearchArguments,
 			parameters: Type.Object({
 				query: Type.Optional(Type.String({ maxLength: MAX_QUERY_CHARS, description: "One focused search query." })),
 				queries: Type.Optional(Type.Array(Type.String({ maxLength: MAX_QUERY_CHARS }), { maxItems: MAX_QUERIES, description: "Optional batch of up to 4 queries." })),

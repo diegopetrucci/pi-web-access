@@ -243,8 +243,18 @@ function boundedMetadata(value: unknown, maximum: number): string {
 	return value.trim().slice(0, maximum);
 }
 
-function resultTitle(value: unknown, fallbackIndex: number): string {
-	return boundedText(value, MAX_EXA_TITLE_CHARS) || `Source ${fallbackIndex}`;
+function fallbackSourceLabel(url: string | undefined, fallbackIndex: number): string {
+	try {
+		const hostname = url ? new URL(url).hostname : "";
+		if (hostname) return boundedMetadata(hostname, MAX_EXA_TITLE_CHARS);
+	} catch {
+		// Invalid URLs use the generic label.
+	}
+	return `Source ${fallbackIndex}`;
+}
+
+function resultTitle(value: unknown, url: string, fallbackIndex: number): string {
+	return boundedText(value, MAX_EXA_TITLE_CHARS) || fallbackSourceLabel(url, fallbackIndex);
 }
 
 function resultUrl(value: unknown): string {
@@ -275,7 +285,7 @@ function mapResults(results: ExaSearchItem[] | undefined, limit: number): Search
 		const url = resultUrl(item.url);
 		if (!url) continue;
 		mapped.push({
-			title: resultTitle(item.title, mapped.length + 1),
+			title: resultTitle(item.title, url, mapped.length + 1),
 			url,
 			snippet: resultSnippet(item),
 		});
@@ -350,7 +360,7 @@ function mapMcpResults(results: McpParsedResult[], limit: number): SearchResult[
 		const url = resultUrl(result.url);
 		if (!url) continue;
 		mapped.push({
-			title: resultTitle(result.title, mapped.length + 1),
+			title: resultTitle(result.title, url, mapped.length + 1),
 			url,
 			snippet: boundedText(result.content, MAX_EXA_TEXT_CHARS),
 		});

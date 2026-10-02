@@ -11,6 +11,7 @@ import {
 	requireAgentDir,
 } from "./settings.ts";
 import { resetRequestOperations } from "./request-budget.ts";
+import { prepareWebSearchArguments } from "./tool-arguments.ts";
 import {
 	MAX_EXA_QUERIES,
 	MAX_EXA_QUERY_CHARS,
@@ -306,6 +307,7 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 		label: "Web Search",
 		description: "Search the web with Exa and return source citations.",
 		promptSnippet: "Use for one focused web search.",
+		prepareArguments: prepareWebSearchArguments as never,
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ maxLength: MAX_EXA_QUERY_CHARS, description: "One focused search query." })),
 			queries: Type.Optional(Type.Array(Type.String({ maxLength: MAX_EXA_QUERY_CHARS }), { maxItems: MAX_EXA_QUERIES, description: "Optional batch of up to 4 queries." })),
@@ -666,6 +668,9 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 				} else if (typeof params.urlIndex === "number" && Number.isInteger(params.urlIndex)) {
 					urlIndex = params.urlIndex;
 					urlData = data.urls[urlIndex];
+				} else if (params.url === undefined && params.urlIndex === undefined && data.urls.length === 1) {
+					urlIndex = 0;
+					urlData = data.urls[0];
 				}
 				if (!urlData) {
 					return errorResult(

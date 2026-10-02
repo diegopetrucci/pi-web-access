@@ -26,7 +26,7 @@ import {
 } from "../extract.ts";
 import { sanitizeInlineDataUris } from "../data-uri-sanitize.ts";
 import { extractRSCContent } from "../rsc-extract.ts";
-import { resetRequestOperations } from "../request-budget.ts";
+import { remainingRequestOperations, resetRequestOperations } from "../request-budget.ts";
 import {
 	clearResults,
 	getFetchCacheDir,
@@ -84,6 +84,9 @@ function fetchedData(id, content = "cached content") {
 const successfulResponse = (body, contentType = "text/plain") =>
 	new Response(body, { status: 200, headers: { "content-type": contentType } });
 
+const cloudflareChallengeHtml = "<!doctype html><html><head><title>Just a moment...</title></head><body><script>window._cf_chl_opt = {};</script><script src=\"/cdn-cgi/challenge-platform/h/g/orchestrate.js\"></script></body></html>";
+const genericMomentHtml = `<!doctype html><html><head><title>Just a moment...</title></head><body><article><h1>Just a moment...</h1><p>${"Readable article text remains available. ".repeat(30)}</p></article></body></html>`;
+
 // Direct local extraction ---------------------------------------------------
 
 test("extracts plain text and readable HTML through the guarded transport", async () => {
@@ -107,6 +110,104 @@ test("extracts plain text and readable HTML through the guarded transport", asyn
 	assert.equal(html.error, null);
 	assert.equal(html.title, "Readable");
 	assert.match(html.content, /Readable heading/);
+});
+
+test("rejects an HTTP 200 Cloudflare challenge header on text without extra work", async () => {
+	await profile();
+	resetRequestOperations();
+	let calls = 0;
+	const fetch = async () => {
+		calls += 1;
+		return new Response("Just a moment...", {
+			status: 200,
+			headers: { "content-type": "text/plain", "cf-mitigated": "challenge" },
+		});
+	};
+
+	const result = await extractContent("https://example.com/header-challenge", undefined, { lookup, fetch });
+	assert.equal(calls, 1);
+	assert.equal(remainingRequestOperations(), 5);
+	assert.equal(result.status, 200);
+	assert.equal(result.mimeType, "text/plain");
+	assert.equal(result.title, "");
+	assert.equal(result.content, "");
+	assert.equal(result.error, "HTTP 200: Blocked by Cloudflare challenge page");
+});
+
+test("rejects the complete Cloudflare challenge HTML signature without usable content", async () => {
+	await profile();
+	resetRequestOperations();
+	let calls = 0;
+	const fetch = async () => {
+		calls += 1;
+		return new Response(cloudflareChallengeHtml, {
+			status: 200,
+			headers: { "content-type": "text/html; charset=utf-8" },
+		});
+	};
+
+	const result = await extractContent("https://example.com/html-challenge", undefined, { lookup, fetch });
+	assert.equal(calls, 1);
+	assert.equal(remainingRequestOperations(), 5);
+	assert.equal(result.status, 200);
+	assert.equal(result.title, "");
+	assert.equal(result.content, "");
+	assert.equal(result.error, "HTTP 200: Blocked by Cloudflare challenge page");
+});
+
+test("keeps generic Just a moment HTML as ordinary readable content", async () => {
+	await profile();
+	resetRequestOperations();
+	let calls = 0;
+	const fetch = async () => {
+		calls += 1;
+		return successfulResponse(genericMomentHtml, "text/html; charset=utf-8");
+	};
+
+	const result = await extractContent("https://example.com/generic-moment", undefined, { lookup, fetch });
+	assert.equal(calls, 1);
+	assert.equal(remainingRequestOperations(), 5);
+	assert.equal(result.error, null);
+	assert.equal(result.title, "Just a moment...");
+	assert.match(result.content, /Readable article text remains available/);
+});
+
+test("keeps challenge markers in non-HTML responses as ordinary content", async () => {
+	await profile();
+	resetRequestOperations();
+	let calls = 0;
+	const fetch = async () => {
+		calls += 1;
+		return successfulResponse(cloudflareChallengeHtml, "text/plain");
+	};
+
+	const result = await extractContent("https://example.com/plain-markers", undefined, { lookup, fetch });
+	assert.equal(calls, 1);
+	assert.equal(remainingRequestOperations(), 5);
+	assert.equal(result.error, null);
+	assert.equal(result.content, cloudflareChallengeHtml);
+});
+
+test("keeps non-200 Cloudflare responses on the existing HTTP error path", async () => {
+	await profile();
+	resetRequestOperations();
+	let calls = 0;
+	const fetch = async () => {
+		calls += 1;
+		return new Response(cloudflareChallengeHtml, {
+			status: 503,
+			statusText: "Service Unavailable",
+			headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+		});
+	};
+
+	const result = await extractContent("https://example.com/non-200-challenge", undefined, { lookup, fetch });
+	assert.equal(calls, 1);
+	assert.equal(remainingRequestOperations(), 5);
+	assert.equal(result.status, 503);
+	assert.equal(result.title, "");
+	assert.equal(result.content, "");
+	assert.equal(result.error, "HTTP 503: Service Unavailable");
 });
 
 test("recovers useful weak RSC content locally", async () => {
