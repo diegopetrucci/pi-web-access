@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, test } from "node:test";
+import { Check } from "typebox/value";
 
 import { MAX_INLINE_CONTENT_CHARS, MIN_INLINE_CONTENT_CHARS, getMaxInlineContentChars } from "../settings.ts";
 import { remainingRequestOperations, resetRequestOperations } from "../request-budget.ts";
@@ -79,6 +80,7 @@ test("settings use a 12000 default, accept 512 through 30000, and reject malform
 test("runtime registers exactly three bounded schemas with integer limits and one literal findText", () => {
 	const { tools } = runtime();
 	assert.deepEqual([...tools.keys()], ["web_search", "fetch_content", "get_search_content"]);
+	assert.equal(typeof tools.get("web_search").prepareArguments, "function");
 	const search = tools.get("web_search").parameters.properties;
 	const fetch = tools.get("fetch_content").parameters.properties;
 	const get = tools.get("get_search_content").parameters.properties;
@@ -94,6 +96,86 @@ test("runtime registers exactly three bounded schemas with integer limits and on
 	assert.equal(get.findText.maxLength, 500);
 	assert.equal(get.findText.items, undefined);
 	assert.doesNotMatch(JSON.stringify([...tools.values()]), /includeContent|source_check|code_search|aliases/);
+});
+
+test("web_search prepares only valid JSON-string arrays before schema validation", async () => {
+	await profile();
+	const { tools } = runtime();
+	const searchSchema = tools.get("web_search").parameters;
+	const prepare = tools.get("web_search").prepareArguments;
+	const raw = {
+		query: "focused",
+		queries: '["one", "two"]',
+		domainFilter: '["docs.example.com", "-spam.example.com"]',
+		numResults: 5,
+	};
+	const prepared = prepare(raw);
+	assert.deepEqual(prepared, {
+		query: "focused",
+		queries: ["one", "two"],
+		domainFilter: ["docs.example.com", "-spam.example.com"],
+		numResults: 5,
+	});
+	assert.equal(Check(searchSchema, prepared), true);
+	assert.notEqual(prepared, raw);
+	assert.deepEqual(raw, {
+		query: "focused",
+		queries: '["one", "two"]',
+		domainFilter: '["docs.example.com", "-spam.example.com"]',
+		numResults: 5,
+	});
+
+	for (const value of [
+		{ queries: ["one"], domainFilter: ["example.com"] },
+		{ queries: "one", domainFilter: "example.com" },
+		{ queries: "[malformed]", domainFilter: "[malformed]" },
+		{ queries: "[1]", domainFilter: '["example.com", 1]' },
+	]) {
+		assert.equal(prepare(value), value);
+	}
+
+	for (const [label, value] of [
+		["more than four queries", { queries: JSON.stringify(["one", "two", "three", "four", "five"]) }],
+		["more than sixteen domains", { domainFilter: JSON.stringify(Array.from({ length: 17 }, () => "example.com")) }],
+		["an oversized query", { queries: JSON.stringify(["q".repeat(2049)]) }],
+		["an oversized domain", { domainFilter: JSON.stringify(["d".repeat(254)]) }],
+	]) {
+		assert.equal(Check(searchSchema, prepare(value)), false, `${label} is rejected by the host schema`);
+	}
+});
+
+test("get_search_content defaults only an unselected single URL", async () => {
+	await profile();
+	storeResult("single-url", {
+		id: "single-url",
+		type: "fetch",
+		timestamp: Date.now(),
+		urls: [{ url: "https://example.com/only", title: "Only", content: "single needle content", error: null }],
+	});
+	storeResult("multi-url", {
+		id: "multi-url",
+		type: "fetch",
+		timestamp: Date.now(),
+		urls: [
+			{ url: "https://example.com/first", title: "First", content: "first content", error: null },
+			{ url: "https://example.com/second", title: "Second", content: "second content", error: null },
+		],
+	});
+	const { tools } = runtime();
+	const getContent = tools.get("get_search_content");
+	const implicitFind = await getContent.execute("call", { responseId: "single-url", findText: "needle" });
+	assert.equal(implicitFind.details.url, "https://example.com/only");
+	assert.match(text(implicitFind), /single needle content/);
+	const implicitSlice = await getContent.execute("call", { responseId: "single-url" });
+	assert.equal(implicitSlice.details.url, "https://example.com/only");
+	assert.match(text(implicitSlice), /single needle content/);
+
+	const omittedMulti = await getContent.execute("call", { responseId: "multi-url" });
+	assert.equal(omittedMulti.details.error, "No URL specified");
+	const invalidIndex = await getContent.execute("call", { responseId: "single-url", urlIndex: 1 });
+	assert.equal(invalidIndex.details.error, "URL not found");
+	const invalidUrl = await getContent.execute("call", { responseId: "single-url", url: "https://example.com/missing" });
+	assert.equal(invalidUrl.details.error, "URL not found");
 });
 
 test("fetch_content defaults to 12000, stays below its configured hard ceiling, and emits IDs only for omitted content", async () => {

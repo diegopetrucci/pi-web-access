@@ -345,6 +345,65 @@ test("provider boundary validates query and domain inputs and bounds result meta
 	assert.equal(result.results[0].snippet.length <= 3000, true);
 });
 
+test("untitled keyed and MCP sources use bounded host labels with safe fallbacks", () => {
+	const child = runChild(`
+		${profileSetup}
+		const longHost = Array.from({ length: 70 }, () => "abcdefghij").join(".") + ".example";
+		const resultUrls = [
+			"https://cdn.example.com/file",
+			"mailto:team@example.com",
+			"file:///tmp/notes.txt",
+			"not-a-url",
+			"https://example.com/kept",
+			"https://" + longHost + "/long",
+		];
+		const resultPayload = {
+			results: resultUrls.map((url, index) => ({
+				title: index === 4 ? "Kept title" : "",
+				url,
+				highlights: ["snippet " + index],
+			})),
+		};
+		const mcpText = resultUrls.map((url, index) =>
+			"Title: " + (index === 4 ? "Kept title" : "") + "\\nURL: " + url + "\\nText: snippet " + index,
+		).join("\\n\\n");
+		const fetch = async (url, init) => {
+			const target = String(url);
+			const body = JSON.parse(init.body);
+			if (target === "https://api.exa.ai/search") {
+				return new Response(JSON.stringify(resultPayload), { status: 200 });
+			}
+			if (body.params.name === "web_search_advanced_exa") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(resultPayload) }] } }), { status: 200 });
+			}
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: mcpText }] } }), { status: 200 });
+		};
+		globalThis.fetch = fetch;
+		const { searchWithExa } = await import(${JSON.stringify(exaUrl)});
+		const { resetRequestOperations } = await import(${JSON.stringify(requestBudgetUrl)});
+		resetRequestOperations();
+		await writeFile(settingsPath, JSON.stringify({ exaApiKey: "label-key" }));
+		const keyed = await searchWithExa("keyed", { numResults: 10, fetch });
+		resetRequestOperations();
+		await writeFile(settingsPath, JSON.stringify({}));
+		const advanced = await searchWithExa("advanced", { domainFilter: ["example.com"], numResults: 10, fetch });
+		resetRequestOperations();
+		const basic = await searchWithExa("basic", { numResults: 10, fetch });
+		console.log(JSON.stringify({
+			keyed: keyed.results.map((result) => result.title),
+			advanced: advanced.results.map((result) => result.title),
+			basic: basic.results.map((result) => result.title),
+		}));
+	`);
+	const { keyed, advanced, basic } = parseChild(child);
+	const expected = ["cdn.example.com", "Source 2", "Source 3", "Source 4", "Kept title"];
+	for (const titles of [keyed, advanced, basic]) {
+		assert.deepEqual(titles.slice(0, 5), expected);
+		assert.equal(titles[5].length <= 512, true);
+		assert.match(titles[5], /^abcdefghij\./);
+	}
+});
+
 test("Exa source has no answer endpoint, base URL override, or local usage accounting", () => {
 	const source = readFileSync(new URL("../exa.ts", import.meta.url), "utf8");
 	assert.doesNotMatch(source, /\/answer|exaBaseUrl|EXA_BASE_URL|exa-usage|MONTHLY_LIMIT|WARNING_THRESHOLD|50000|x-exa-/);

@@ -17,6 +17,7 @@ const EXPECTED_ALLOWLIST = [
 	"settings.ts",
 	"ssrf-protection.ts",
 	"storage.ts",
+	"tool-arguments.ts",
 	"web-tools.ts",
 	"README.md",
 	"CHANGELOG.md",

@@ -90,6 +90,11 @@ test("index exposes exactly the three tools without loading the runtime", () => 
 			});
 
 			assert.deepEqual([...tools.keys()], ["web_search", "fetch_content", "get_search_content"]);
+			assert.equal(typeof tools.get("web_search").prepareArguments, "function");
+			const rawArguments = { queries: '["lazy"]', domainFilter: '["example.com"]' };
+			const preparedArguments = tools.get("web_search").prepareArguments(rawArguments);
+			assert.deepEqual(preparedArguments, { queries: ["lazy"], domainFilter: ["example.com"] });
+			assert.deepEqual(rawArguments, { queries: '["lazy"]', domainFilter: '["example.com"]' });
 			assert.equal(globalThis.__runtimeLoaded, false);
 			const theme = { fg: (_name, value) => value, bold: (value) => value };
 			const preLoadCall = tools.get("web_search").renderCall({ query: "before load" }, theme);

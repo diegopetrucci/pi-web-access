@@ -20,6 +20,10 @@ export PI_CODING_AGENT_DIR=/absolute/path/to/tlh-profile
 
 The variable is mandatory. There is no fallback to `~/.pi`, `XDG_CONFIG_HOME`, or a legacy profile path.
 
+### Host compatibility
+
+The package declares `typebox` as a host-provided peer (`*`) so the compatible host loader can alias it to the host's own runtime module. The exact `typebox@1.3.27` entry is development-only for reproducible typechecking; it is not bundled or installed as a private runtime copy. The direct `undici` dependency requires `8.11.2` or newer.
+
 ## Tools
 
 ### `web_search`
@@ -32,7 +36,7 @@ Fetches up to six `http://` or `https://` URLs and extracts readable Markdown lo
 
 ### `get_search_content`
 
-Retrieves stored search or fetch material using a `responseId` and a query/URL selector. It supports bounded, line-aware continuation with `offset` and `limit`, or one case-insensitive literal `findText` match. A response ID is exposed only when stored material was omitted or truncated from the preceding tool result.
+Retrieves stored search or fetch material using a `responseId` and a query/URL selector. For a stored fetch with one URL, `url` and `urlIndex` may be omitted; multiple stored URLs still require an explicit selector. It supports bounded, line-aware continuation with `offset` and `limit`, or one case-insensitive literal `findText` match. A response ID is exposed only when stored material was omitted or truncated from the preceding tool result.
 
 ## Isolated settings and cache
 

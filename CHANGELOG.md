@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `fetch_content` now rejects HTTP 200 Cloudflare challenge pages with an explicit blocked-page error instead of returning interstitial content. Detection uses Cloudflare's `cf-mitigated: challenge` header or the complete challenge-page HTML signature; generic `Just a moment...` text and non-HTML bodies remain ordinary content.
+- `get_search_content` now defaults to the sole stored fetched URL when `url` and `urlIndex` are omitted; multiple stored URLs still require an explicit selector.
+- `web_search` prepares JSON-string `queries` and `domainFilter` arrays before schema validation without changing ordinary inputs.
+- Untitled Exa results now use bounded URL hostnames as source labels, retaining existing titles and generic fallbacks for malformed or hostless URLs.
+- The direct `undici` dependency now requires 8.11.2 or newer, and `typebox` is declared as a host-provided peer with an exact 1.3.27 development pin to avoid duplicate runtime copies.
+
 ## [0.29.1] - 2026-09-22
 
 This is a selective The Last Harness security/token-efficiency port through upstream commit `192ac18`, not upstream v0.29.0 feature parity.

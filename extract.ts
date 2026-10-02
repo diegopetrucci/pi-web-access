@@ -143,6 +143,18 @@ function isDeadlineError(err: unknown, deadline: ExtractionDeadline): boolean {
 		(Date.now() - deadline.startedAt >= deadline.timeoutMs && !deadline.parentSignal?.aborted);
 }
 
+// Cloudflare interstitials served with HTTP 200. The header is authoritative for
+// any text response; the body check is HTML-only and needs both challenge-platform
+// markers so a generic "Just a moment..." page never matches.
+function isCloudflareChallenge(response: Response, text: string, isHTML: boolean): boolean {
+	if (response.status !== 200) return false;
+	if (response.headers.get("cf-mitigated") === "challenge") return true;
+	return isHTML &&
+		/<title>\s*Just a moment\.\.\.\s*<\/title>/i.test(text) &&
+		text.includes("window._cf_chl_opt") &&
+		text.includes("/cdn-cgi/challenge-platform/");
+}
+
 function isLikelyJSRendered(html: string): boolean {
 	const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
 	if (!bodyMatch) return false;
@@ -349,6 +361,10 @@ async function extractViaHttp(
 		const text = await deadline.run(() => response.text());
 		deadline.assert();
 		const isHTML = normalizedContentType.includes("text/html") || normalizedContentType.includes("application/xhtml+xml");
+		if (isCloudflareChallenge(response, text, isHTML)) {
+			activityMonitor.logComplete(activityId, response.status);
+			return extractionResult(url, "", "", `HTTP ${response.status}: Blocked by Cloudflare challenge page`, response.status, mimeType);
+		}
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
 			return extractionResult(url, titleFromText(text, url), text, null, response.status, mimeType);
