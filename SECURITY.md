@@ -2,7 +2,7 @@
 
 ## Scope
 
-`@diegopetrucci/pi-web-access@0.29.1` is a The Last Harness selective port with exactly three tools: `web_search`, `fetch_content`, and `get_search_content`. It is based on upstream `nicobailon/pi-web-access@192ac18`, not a claim of upstream v0.29.0 feature parity.
+`@diegopetrucci/pi-web-access@0.29.2` is a The Last Harness selective port with exactly three tools: `web_search`, `fetch_content`, and `get_search_content`. It is based on upstream `nicobailon/pi-web-access@192ac18`, not a claim of upstream v0.29.0 feature parity.
 
 All tool use requires `PI_CODING_AGENT_DIR` to be an absolute path. The only package settings path is:
 
@@ -27,4 +27,4 @@ The only supported settings are `exaApiKey`, `fetch.timeout` (1–120 seconds, d
 
 Do not disclose credentials, private URLs, or personal data in a public issue. Report a suspected vulnerability through the repository's private GitHub security reporting channel when available, or contact the maintainers privately with a minimal reproduction, affected version, and impact. Allow time for a fix before public disclosure.
 
-To remove the package and its package-owned data, uninstall version `0.29.1` from the host runtime and remove the settings file plus `$PI_CODING_AGENT_DIR/cache/pi-web-access/`. The external tlh pin and obsolete curator/search documentation are intentionally a separate post-publication follow-up and are not changed by this repository release.
+To remove the package and its package-owned data, uninstall version `0.29.2` from the host runtime and remove the settings file plus `$PI_CODING_AGENT_DIR/cache/pi-web-access/`. The external tlh pin and obsolete curator/search documentation are intentionally a separate post-publication follow-up and are not changed by this repository release.

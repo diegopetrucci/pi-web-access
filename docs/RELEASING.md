@@ -2,7 +2,7 @@
 
 This is the evergreen release procedure for the The Last Harness (tlh) fork and
 `@diegopetrucci/pi-web-access`. The npm package is a selective Exa-only port;
-its release tag is `tlh-v0.29.1` for this handoff.
+its release tag follows the evergreen `tlh-v<version>` convention.
 
 ## Trusted publishing
 
@@ -41,6 +41,6 @@ is unavailable, record the reason in the release handoff, and preserve
 
 After npm propagation, verify the package and the exact install target. Then,
 in a separately authorized change to the external tlh repository, update its
-pin to `@diegopetrucci/pi-web-access@0.29.1` and remove or correct obsolete
+pin to `@diegopetrucci/pi-web-access@<version>` and remove or correct obsolete
 curator/search documentation. This repository release does not edit that
 external repository or pin.
