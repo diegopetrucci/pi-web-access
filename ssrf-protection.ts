@@ -1,3 +1,4 @@
+import { assertSupportedNodeRuntime } from "./runtime-policy.ts";
 import { lookup as dnsLookup } from "node:dns/promises";
 import net from "node:net";
 import { Agent, buildConnector, fetch as undiciFetch } from "undici";
@@ -580,6 +581,7 @@ export async function fetchRemoteUrl(
 	init: RequestInit = {},
 	options: FetchRemoteOptions = {},
 ): Promise<Response> {
+	assertSupportedNodeRuntime();
 	const settings = readSettings();
 	const policy = options.domainPolicy ?? getDomainPolicy(settings);
 	const secrets = [...new Set([

@@ -14,6 +14,7 @@ const EXPECTED_ALLOWLIST = [
 	"index.ts",
 	"request-budget.ts",
 	"rsc-extract.ts",
+	"runtime-policy.ts",
 	"settings.ts",
 	"ssrf-protection.ts",
 	"storage.ts",
