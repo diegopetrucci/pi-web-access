@@ -14,7 +14,7 @@ GitHub Actions `workflow_dispatch`:
 2. Dispatch **Release to npm** with the required `ref=<release tag>` input.
    The workflow requires the exact `tlh-v<package-version>` value and rejects
    branches, `main`, and mismatched tags.
-3. The workflow checks out the tag, uses Node 24, runs `npm ci`, `npm test`,
+3. The workflow checks out the tag, uses Node 24.22.1, runs `npm ci`, `npm test`,
    `npm run typecheck`, `npm run audit:runtime`, and `npm run package:check`,
    then fails if the exact `name@version` is already on npm.
 4. On success it runs `npm publish --access public --provenance`.

@@ -4,7 +4,7 @@
   "description": "Web search and URL fetching for the tlh coding agent (Exa provider)",
   "type": "module",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.23.4 <23 || >=24.22.1 <25 || >=26.12.1 <27"
   },
   "scripts": {
     "test": "node --test",
@@ -39,6 +39,7 @@
     "index.ts",
     "request-budget.ts",
     "rsc-extract.ts",
+    "runtime-policy.ts",
     "settings.ts",
     "ssrf-protection.ts",
     "storage.ts",
@@ -67,7 +68,7 @@
     "linkedom": "^0.16.0",
     "p-limit": "^6.1.0",
     "turndown": "^7.2.0",
-    "undici": "^8.11.2"
+    "undici": "^8.12.2"
   },
   "peerDependencies": {
     "typebox": "*"

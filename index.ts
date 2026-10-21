@@ -1,3 +1,4 @@
+import { assertSupportedNodeRuntime } from "./runtime-policy.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -81,6 +82,7 @@ function renderResult(result: any, theme: any): Text {
 }
 
 export default function register(pi: ExtensionAPI): void {
+	assertSupportedNodeRuntime();
 	let runtimePromise: Promise<Runtime> | undefined;
 	let loadedRuntime: Runtime | undefined;
 	let pendingSessionRestore: PendingSessionRestore | undefined;

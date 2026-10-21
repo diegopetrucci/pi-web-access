@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -52,6 +52,35 @@ async function withProfile(root, fn) {
 
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 const publicFetchOptions = (fetch) => ({ lookup: publicLookup, fetch });
+
+test("allowed responses still decode benign Brotli through the real Undici transport", async () => {
+	const expected = "A harmless compressed page from a permitted website.";
+	const server = createServer((_request, response) => {
+		response.writeHead(200, { "content-encoding": "br", "content-type": "text/plain" });
+		response.end(brotliCompressSync(Buffer.from(expected)));
+	});
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const dispatcher = new Agent({ keepAliveTimeout: 1, maxCachedSessions: 0 });
+	try {
+		await withProfile(await profile(), async () => {
+			resetRequestOperations();
+			const response = await fetchRemoteUrl("https://example.com/page", {}, {
+				lookup: publicLookup,
+				// The explicit test transport maps a validated public URL to our
+				// local fixture; production SSRF rules remain intact.
+				fetch: (_url, init) => DEFAULT_FETCH(`http://127.0.0.1:${server.address().port}/`, { ...init, dispatcher }),
+			});
+			assert.equal(await response.text(), expected);
+		});
+	} finally {
+		await dispatcher.close();
+		server.closeAllConnections();
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
 
 function assertBlocked(url) {
 	return assert.rejects(

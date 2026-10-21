@@ -12,6 +12,14 @@ $PI_CODING_AGENT_DIR/extensions/pi-web-access/settings.json
 
 The only supported settings are `exaApiKey`, `fetch.timeout` (1–120 seconds, default 30), `fetchContent.domainPolicy` (`allow`/`deny` hostname lists), and `maxInlineContentChars` (512–30,000, default 12,000). A non-empty isolated `exaApiKey` takes precedence over `EXA_API_KEY`; with neither, search uses unauthenticated Exa MCP. No proxy or environment-proxy settings are supported.
 
+## Runtime security requirements
+
+Use stable Node.js 22.23.4+ within 22.x, 24.22.1+ within 24.x, or 26.12.1+ within 26.x. Other branches and prereleases are unsupported. Registration and the shared remote-request boundary reject unsupported runtimes, including when a custom fetch implementation is supplied.
+
+These floors include the [October 2026 Node security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), including CVE-2026-111497 in the native Brotli decoder and the [eMudhra CA update](https://emudhra.we-have-a-problem.com/). A permitted public server can return a Brotli response; SSRF checks, output limits, an npm dependency update, and `Accept-Encoding: identity` cannot replace a patched Node runtime. Undici must also be at least 8.12.2 for its separate TLS and response-handling fixes.
+
+Operators must upgrade the actual Node executable hosting Pi, then restart that process under the fixed runtime. Updating this package does not upgrade an already running host. System/OpenSSL CA stores, `NODE_EXTRA_CA_CERTS`, custom CA bundles, and custom transports require independent trust-store remediation; the version check cannot validate their contents. Keep certificate verification enabled. No host upgrades or restarts are performed by this package.
+
 ## Request protections
 
 - Only HTTP(S) requests are allowed. Internal, loopback, private, reserved, and blocked local hostnames are rejected.

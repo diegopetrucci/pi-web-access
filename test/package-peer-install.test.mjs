@@ -104,7 +104,7 @@ test("packed peer installs keep TypeBox host-provided and load through the pinne
 	assert.equal(packageManifest.dependencies?.typebox, undefined);
 	assert.equal(packageManifest.peerDependencies?.typebox, "*");
 	assert.equal(packageManifest.devDependencies?.typebox, "1.3.27");
-	assert.equal(packageManifest.dependencies?.undici, "^8.11.2");
+	assert.equal(packageManifest.dependencies?.undici, "^8.12.2");
 
 	const workspace = await mkdtemp(join(tmpdir(), "pi-web-access-peer-install-"));
 	try {

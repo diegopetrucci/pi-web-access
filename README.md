@@ -12,7 +12,7 @@ In the compatible upstream Pi coding-agent runtime:
 pi install npm:@diegopetrucci/pi-web-access@0.29.2
 ```
 
-Requires Node.js **>=22.19.0**. Set an absolute profile path before using any tool:
+Requires stable Node.js **22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x)**. Other release lines and prereleases are unsupported. Extension registration and every remote request fail closed on unsupported runtimes. Set an absolute profile path before using any tool:
 
 ```bash
 export PI_CODING_AGENT_DIR=/absolute/path/to/tlh-profile
@@ -22,7 +22,7 @@ The variable is mandatory. There is no fallback to `~/.pi`, `XDG_CONFIG_HOME`, o
 
 ### Host compatibility
 
-The package declares `typebox` as a host-provided peer (`*`) so the compatible host loader can alias it to the host's own runtime module. The exact `typebox@1.3.27` entry is development-only for reproducible typechecking; it is not bundled or installed as a private runtime copy. The direct `undici` dependency requires `8.11.2` or newer.
+The package declares `typebox` as a host-provided peer (`*`) so the compatible host loader can alias it to the host's own runtime module. The exact `typebox@1.3.27` entry is development-only for reproducible typechecking; it is not bundled or installed as a private runtime copy. The direct `undici` dependency requires `8.12.2` or newer.
 
 ## Tools
 
