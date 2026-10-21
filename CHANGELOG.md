@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.29.3] - 2026-10-21
 
 - Require patched stable Node.js 22.23.4+, 24.22.1+, or 26.12.1+ on their respective supported branches for the October 2026 Node security and eMudhra CA fixes. Reject unsupported runtimes at extension registration and before remote requests, including custom fetches.
 - Raise the Undici floor to 8.12.2 (lockfile 8.12.3) for its separate TLS and response-handling security fixes.

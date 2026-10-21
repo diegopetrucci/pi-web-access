@@ -81,9 +81,9 @@ test("release audits runtime dependencies before package verification and publis
 	assert.ok(audit < publish);
 });
 
-test("npm package contains only the v0.29.2 runtime and release allowlist", () => {
+test("npm package contains only the v0.29.3 runtime and release allowlist", () => {
 	assert.equal(packageJson.name, "@diegopetrucci/pi-web-access");
-	assert.equal(packageJson.version, "0.29.2");
+	assert.equal(packageJson.version, "0.29.3");
 	assert.deepEqual(packageJson.files, EXPECTED_ALLOWLIST);
 
 	const pack = npmPackDryRun();
