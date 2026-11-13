@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.4] - 2026-11-13
+
+### Fixed
+
+- `get_search_content` now clamps an integer `limit` above the configured `maxInlineContentChars` (default 12000) instead of failing with `Error: Invalid content limit.`, for both stored search (`queryIndex`) and stored fetch (`urlIndex`) responses. The clamped page keeps its continuation hint, `details.limit` reports the effective value, and `details.requestedLimit` is added only when clamping changed the request. This stops agents from burning tool calls retrying a limit the schema advertises as valid.
+
+### Changed
+
+- Invalid `limit` errors now state the allowed range (for example `Error: Invalid content limit (allowed 512-12000).`) and the `limit` parameter description notes that it is capped by the `maxInlineContentChars` setting.
+
 ## [0.29.3] - 2026-10-21
 
 - Require patched stable Node.js 22.23.4+, 24.22.1+, or 26.12.1+ on their respective supported branches for the October 2026 Node security and eMudhra CA fixes. Reject unsupported runtimes at extension registration and before remote requests, including custom fetches.
