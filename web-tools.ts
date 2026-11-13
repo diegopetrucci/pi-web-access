@@ -251,6 +251,32 @@ function errorResult(text: string, details: Record<string, unknown>): Record<str
 	return { content: [{ type: "text", text }], details };
 }
 
+interface ResolvedContentLimit {
+	/** Effective limit used to build the page. */
+	limit: number;
+	/** Original request, present only when clamping changed it. */
+	requestedLimit?: number;
+}
+
+/**
+ * Validate a requested limit and clamp it to the configured maximum, so an
+ * over-max request still returns content instead of burning a retry.
+ */
+function resolveContentLimit(requested: unknown, maxInlineContentChars: number): ResolvedContentLimit | null {
+	if (typeof requested !== "number" || !Number.isInteger(requested) || requested < MIN_INLINE_CONTENT_CHARS) return null;
+	const limit = Math.min(requested, maxInlineContentChars);
+	return limit === requested ? { limit } : { limit, requestedLimit: requested };
+}
+
+function invalidContentLimitResult(requested: unknown, maxInlineContentChars: number): Record<string, unknown> {
+	return errorResult(`Error: Invalid content limit (allowed ${MIN_INLINE_CONTENT_CHARS}-${maxInlineContentChars}).`, {
+		error: "Invalid limit",
+		limit: inputValue(requested),
+		minLimit: MIN_INLINE_CONTENT_CHARS,
+		maxLimit: maxInlineContentChars,
+	});
+}
+
 function textFromResult(result: any): string {
 	const parts = result?.content as Array<{ type?: string; text?: string }> | undefined;
 	const part = parts?.find((candidate) => candidate?.type === "text");
@@ -588,7 +614,7 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 			url: Type.Optional(Type.String({ maxLength: MAX_EXA_URL_CHARS, description: "Select a stored URL." })),
 			urlIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_URLS - 1, description: "Stored URL index." })),
 			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_OFFSET, description: "Character offset for the next slice." })),
-			limit: Type.Optional(Type.Integer({ minimum: MIN_INLINE_CONTENT_CHARS, maximum: MAX_INLINE_CONTENT_CHARS, default: DEFAULT_MAX_INLINE_CONTENT_CHARS, description: "Maximum returned characters; default 12000." })),
+			limit: Type.Optional(Type.Integer({ minimum: MIN_INLINE_CONTENT_CHARS, maximum: MAX_INLINE_CONTENT_CHARS, default: DEFAULT_MAX_INLINE_CONTENT_CHARS, description: "Maximum returned characters; capped by the maxInlineContentChars setting (default 12000)." })),
 			findText: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_FIND_TEXT_CHARS, description: "One literal, case-insensitive text match." })),
 		}),
 
@@ -638,13 +664,13 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 				}
 
 				const offset = params.offset === undefined ? 0 : params.offset;
-				const limit = params.limit === undefined ? maxInlineContentChars : params.limit;
+				const requestedLimit = params.limit === undefined ? maxInlineContentChars : params.limit;
 				if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > fullResults.length || offset > MAX_OFFSET) {
 					return errorResult("Error: Invalid content offset.", { error: "Invalid offset", offset: inputValue(offset), contentLength: fullResults.length });
 				}
-				if (typeof limit !== "number" || !Number.isInteger(limit) || limit < MIN_INLINE_CONTENT_CHARS || limit > maxInlineContentChars) {
-					return errorResult("Error: Invalid content limit.", { error: "Invalid limit", limit: inputValue(limit), minLimit: MIN_INLINE_CONTENT_CHARS, maxLimit: maxInlineContentChars });
-				}
+				const resolvedLimit = resolveContentLimit(requestedLimit, maxInlineContentChars);
+				if (!resolvedLimit) return invalidContentLimitResult(requestedLimit, maxInlineContentChars);
+				const { limit, requestedLimit: clampedFrom } = resolvedLimit;
 				const page = makePageSlice(
 					fullResults,
 					offset,
@@ -655,7 +681,7 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 				);
 				return {
 					content: [{ type: "text", text: page.text }],
-					details: { responseId, query: queryData.query.slice(0, MAX_EXA_QUERY_CHARS), resultCount: queryData.results.length, contentLength: fullResults.length, offset, limit, returnedChars: page.returnedChars, nextOffset: page.hasMore ? page.endOffset : null, truncated: page.hasMore },
+					details: { responseId, query: queryData.query.slice(0, MAX_EXA_QUERY_CHARS), resultCount: queryData.results.length, contentLength: fullResults.length, offset, limit, ...(clampedFrom === undefined ? {} : { requestedLimit: clampedFrom }), returnedChars: page.returnedChars, nextOffset: page.hasMore ? page.endOffset : null, truncated: page.hasMore },
 				};
 			}
 
@@ -694,13 +720,13 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 				}
 
 				const offset = params.offset === undefined ? 0 : params.offset;
-				const limit = params.limit === undefined ? maxInlineContentChars : params.limit;
+				const requestedLimit = params.limit === undefined ? maxInlineContentChars : params.limit;
 				if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > urlData.content.length || offset > MAX_OFFSET) {
 					return errorResult("Error: Invalid content offset.", { error: "Invalid offset", offset: inputValue(offset), contentLength: urlData.content.length });
 				}
-				if (typeof limit !== "number" || !Number.isInteger(limit) || limit < MIN_INLINE_CONTENT_CHARS || limit > maxInlineContentChars) {
-					return errorResult("Error: Invalid content limit.", { error: "Invalid limit", limit: inputValue(limit), minLimit: MIN_INLINE_CONTENT_CHARS, maxLimit: maxInlineContentChars });
-				}
+				const resolvedLimit = resolveContentLimit(requestedLimit, maxInlineContentChars);
+				if (!resolvedLimit) return invalidContentLimitResult(requestedLimit, maxInlineContentChars);
+				const { limit, requestedLimit: clampedFrom } = resolvedLimit;
 				const heading = urlData.title ? `# ${urlData.title}\n\n` : "";
 				const page = makePageSlice(
 					urlData.content,
@@ -712,7 +738,7 @@ export default function (pi: ExtensionAPI, options: WebToolsOptions = {}) {
 				);
 				return {
 					content: [{ type: "text", text: page.text }],
-					details: { responseId, url: urlData.url, title: urlData.title, contentLength: urlData.content.length, offset, limit, returnedChars: page.returnedChars, nextOffset: page.hasMore ? page.endOffset : null, truncated: page.hasMore },
+					details: { responseId, url: urlData.url, title: urlData.title, contentLength: urlData.content.length, offset, limit, ...(clampedFrom === undefined ? {} : { requestedLimit: clampedFrom }), returnedChars: page.returnedChars, nextOffset: page.hasMore ? page.endOffset : null, truncated: page.hasMore },
 				};
 			}
 
